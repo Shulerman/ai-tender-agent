@@ -1,9 +1,12 @@
 
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
 
 from app.tenders.models import Tender
 from app.database import SessionLocal, TenderDB
+from app.documents.storage import save_document
+from app.documents.pdf_reader import extract_text_from_pdf
+from app.documents.docx_reader import extract_text_from_docx
 
 app = FastAPI(
     title="AI Tender Agent",
@@ -19,7 +22,32 @@ def get_db():
     finally:
         db.close()
 
+@app.post("/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    try:
+        document = await save_document(file)
 
+        if document["original_name"].lower().endswith(".pdf"):            extracted_text = extract_text_from_pdf(
+                document["file_path"]
+            )
+        elif document["original_name"].lower().endswith(".docx"):
+            extracted_text = extract_text_from_docx(
+                document["file_path"]
+            )
+        else:
+            raise ValueError("Неподдерживаемый формат документа")
+
+        return {
+            "message": "Документ успешно загружен и обработан",
+            "document_id": document["document_id"],
+            "original_name": document["original_name"],
+            "size_bytes": document["size_bytes"],
+            "text_length": len(extracted_text),
+            "text": extracted_text
+        }
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 @app.get("/")
 def home():
     return {

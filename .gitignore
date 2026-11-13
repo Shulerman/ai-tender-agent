@@ -17,3 +17,6 @@ venv/
 *.log
 .DS_Store
 
+
+# Uploaded tender documents
+data/documents/
