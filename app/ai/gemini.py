@@ -1,5 +1,6 @@
-import os
 
+import os
+import asyncio
 import httpx
 
 
@@ -15,7 +16,7 @@ GEMINI_URL = (
 
 
 async def generate_text(prompt: str, json_mode: bool = False) -> str:
-    """Отправляет запрос в Gemini и возвращает текстовый ответ."""
+    """Отправляет запрос в Gemini с повторными попытками."""
 
     api_key = os.getenv("GEMINI_API_KEY")
 
@@ -45,18 +46,52 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
             "responseMimeType": "application/json"
         }
 
-    async with httpx.AsyncClient(timeout=90) as client:
-        response = await client.post(
-            GEMINI_URL,
-            headers=headers,
-            json=payload,
-        )
+    last_error = None
 
-        response.raise_for_status()
-        result = response.json()
+    async with httpx.AsyncClient(timeout=90) as client:
+
+        for attempt in range(3):
+
+            try:
+                response = await client.post(
+                    GEMINI_URL,
+                    headers=headers,
+                    json=payload,
+                )
+
+                response.raise_for_status()
+                result = response.json()
+                break
+
+            except httpx.HTTPStatusError as error:
+                last_error = error
+
+                if error.response.status_code not in (429, 500, 502, 503, 504):
+                    raise RuntimeError(
+                        f"Ошибка Gemini API: HTTP "
+                        f"{error.response.status_code}"
+                    ) from error
+
+                if attempt == 2:
+                    raise RuntimeError(
+                        "Gemini временно недоступен после "
+                        "трёх попыток. Попробуйте позже."
+                    ) from error
+
+            except (httpx.TimeoutException, httpx.NetworkError) as error:
+                last_error = error
+
+                if attempt == 2:
+                    raise RuntimeError(
+                        "Не удалось связаться с Gemini "
+                        "после трёх попыток."
+                    ) from error
+
+            await asyncio.sleep(2 ** attempt)
 
     try:
         return result["candidates"][0]["content"]["parts"][0]["text"]
+
     except (KeyError, IndexError, TypeError):
         raise RuntimeError(
             f"Gemini вернул неожиданный ответ: {result}"

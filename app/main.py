@@ -8,6 +8,7 @@ from app.documents.storage import save_document
 from app.documents.pdf_reader import extract_text_from_pdf
 from app.documents.docx_reader import extract_text_from_docx
 from app.ai.technical_analyst import analyze_technical_requirements
+from app.ai.legal_analyst import analyze_legal_requirements
 
 app = FastAPI(
     title="AI Tender Agent",
@@ -185,5 +186,22 @@ async def analyze_technical(payload: dict):
 
     return {
         "message": "Technical analysis completed",
+        "analysis": result
+    }
+
+@app.post("/analysis/legal")
+async def analyze_legal(payload: dict):
+    document_text = payload.get("document_text")
+
+    if not isinstance(document_text, str) or not document_text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Document text is required"
+        )
+
+    result = await analyze_legal_requirements(document_text)
+
+    return {
+        "message": "Legal analysis completed",
         "analysis": result
     }
