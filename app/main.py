@@ -59,3 +59,27 @@ def create_tender(tender: Tender, db: Session = Depends(get_db)):
         "database_id": new_tender.id,
         "tender": tender
     }
+    return {
+        "message": "Tender successfully saved",
+        "database_id": new_tender.id,
+        "tender": tender
+    }
+
+
+@app.get("/tenders")
+def get_tenders(db: Session = Depends(get_db)):
+    tenders = db.query(TenderDB).order_by(TenderDB.id.desc()).all()
+
+    return [
+        {
+            "id": tender.id,
+            "tender_id": tender.tender_id,
+            "title": tender.title,
+            "customer": tender.customer,
+            "price": tender.price,
+            "region": tender.region,
+            "law": tender.law,
+            "status": tender.status
+        }
+        for tender in tenders
+    ]
