@@ -7,6 +7,7 @@ from app.database import SessionLocal, TenderDB
 from app.documents.storage import save_document
 from app.documents.pdf_reader import extract_text_from_pdf
 from app.documents.docx_reader import extract_text_from_docx
+from app.ai.technical_analyst import analyze_technical_requirements
 
 app = FastAPI(
     title="AI Tender Agent",
@@ -169,4 +170,20 @@ def update_tender(
         "message": "Tender successfully updated",
         "tender_id": existing.tender_id,
         "updated_fields": sorted(updates.keys())
+    }
+@app.post("/analysis/technical")
+async def analyze_technical(payload: dict):
+    document_text = payload.get("document_text")
+
+    if not isinstance(document_text, str) or not document_text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Document text is required"
+        )
+
+    result = await analyze_technical_requirements(document_text)
+
+    return {
+        "message": "Technical analysis completed",
+        "analysis": result
     }
