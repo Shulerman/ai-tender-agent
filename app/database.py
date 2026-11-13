@@ -1,6 +1,6 @@
 
 from pydantic_settings import BaseSettings
-from sqlalchemy import create_engine, Column, Integer, String, Float
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 
@@ -39,3 +39,13 @@ class TenderDB(Base):
     region = Column(String, nullable=True)
     law = Column(String, nullable=True)
     status = Column(String, default="new")
+
+    customer_phone = Column(String, nullable=True)
+    customer_email = Column(String, nullable=True)
+    customer_address = Column(String, nullable=True)
+    delivery_address = Column(String, nullable=True)
+
+    application_start = Column(DateTime, nullable=True)
+    application_end = Column(DateTime, nullable=True)
+    price_procedure_date = Column(DateTime, nullable=True)
+    results_date = Column(DateTime, nullable=True)
