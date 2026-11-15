@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -6,7 +5,7 @@ def normalize_text(value):
     """Преобразует строку или объект Gemini в обычный текст."""
 
     if isinstance(value, str):
-        return value
+        return value.strip() or "Не указано"
 
     if isinstance(value, dict):
         preferred_keys = [
@@ -46,11 +45,32 @@ def normalize_text(value):
 class LegalIssue(BaseModel):
     category: str = "Юридический вопрос"
     description: str = "Не указано"
+
+    # Юридическая оценка
     risk_level: str = "Не определён"
+
+    # Коммерческая оценка для поставщика
+    commercial_risk_level: str = "Недостаточно информации"
+    commercial_risk_reason: str = "Не оценено"
+
     document_clause: str = "Не указано"
     document_quote: str = "Не указано"
+
+    # Правовое основание
     legal_basis: str = "Не проверено"
     legal_basis_status: str = "Требует проверки"
+    legal_basis_text: str = "Не найдено"
+
+    # Проверка применимости правовой нормы
+    legal_applicability_status: str = "Требует проверки"
+    legal_applicability_reason: str = "Не проверено"
+    legal_applicability_evidence: str = "Не найдено"
+
+    # Отдельная проверка наличия нарушения закона
+    legal_violation_status: str = "Требует проверки"
+    legal_violation_reason: str = "Не проверено"
+    legal_violation_evidence: str = "Не найдено"
+
     recommendation: str = "Требуется проверка специалистом"
 
     @model_validator(mode="before")
@@ -58,8 +78,8 @@ class LegalIssue(BaseModel):
     def normalize_issue(cls, value):
         if isinstance(value, str):
             return {
-                "category": "Юридический риск",
-                "description": value
+                "category": "Юридический вопрос",
+                "description": value,
             }
 
         if not isinstance(value, dict):
@@ -90,11 +110,75 @@ class LegalIssue(BaseModel):
             )
 
             data["description"] = normalize_text(description)
-
         else:
             data["description"] = normalize_text(
                 data["description"]
             )
+
+        for field in [
+            "commercial_risk_reason",
+            "legal_basis",
+            "legal_basis_status",
+            "legal_basis_text",
+            "legal_applicability_status",
+            "legal_applicability_reason",
+            "legal_applicability_evidence",
+            "legal_violation_status",
+            "legal_violation_reason",
+            "legal_violation_evidence",
+        ]:
+            if field in data:
+                data[field] = normalize_text(data[field])
+
+        return data
+
+
+class CommercialRisk(BaseModel):
+    category: str = "Коммерческий риск"
+    description: str = "Не указано"
+
+    commercial_risk_level: str = "Недостаточно информации"
+    commercial_risk_reason: str = "Не оценено"
+
+    document_clause: str = "Не указано"
+    document_quote: str = "Не указано"
+
+    recommendation: str = "Требуется дополнительная оценка"
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_commercial_risk(cls, value):
+        if isinstance(value, str):
+            return {
+                "category": "Коммерческий риск",
+                "description": value,
+            }
+
+        if not isinstance(value, dict):
+            return value
+
+        data = dict(value)
+
+        if "description" not in data:
+            data["description"] = (
+                data.get("risk_description")
+                or data.get("details")
+                or data.get("explanation")
+                or data.get("value")
+                or "Не указано"
+            )
+
+        for field in [
+            "category",
+            "description",
+            "commercial_risk_level",
+            "commercial_risk_reason",
+            "document_clause",
+            "document_quote",
+            "recommendation",
+        ]:
+            if field in data:
+                data[field] = normalize_text(data[field])
 
         return data
 
@@ -108,6 +192,10 @@ class LegalAnalysis(BaseModel):
     )
 
     risks: list[LegalIssue] = Field(
+        default_factory=list
+    )
+
+    commercial_risks: list[CommercialRisk] = Field(
         default_factory=list
     )
 

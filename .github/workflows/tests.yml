@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  regression-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Prepare isolated test database
+        env:
+          DATABASE_URL: sqlite:///./ci_test.db
+          POSTGRES_PASSWORD: ci-test-only
+          PYTHONPATH: .
+        run: python tests/ci_setup.py
+
+      - name: Run regression tests
+        env:
+          DATABASE_URL: sqlite:///./ci_test.db
+          POSTGRES_PASSWORD: ci-test-only
+          PYTHONPATH: .
+        run: |
+          python -m compileall -q app
+          for test in \
+            test_legal_context.py \
+            test_legal_search.py \
+            test_legal_content_search.py \
+            test_legal_evidence_validation.py \
+            test_legal_applicability.py \
+            test_legal_applicability_success.py \
+            test_legal_violation_guard.py \
+            test_legal_violation_evidence.py \
+            test_legal_full_integration.py \
+            test_legal_confirmed_violation.py \
+            test_legal_missing_basis.py \
+            test_legal_gemini_failure.py
+          do
+            echo ""
+            echo "===== $test ====="
+            python "$test" || exit 1
+          done
