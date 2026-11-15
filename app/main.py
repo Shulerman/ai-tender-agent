@@ -19,6 +19,7 @@ from app.documents.html_reader import extract_text_from_html
 
 from app.ai.technical_analyst import analyze_technical_requirements
 from app.ai.legal_analyst import analyze_legal_requirements
+from app.ai.full_analyst import analyze_full_tender
 
 
 app = FastAPI(
@@ -260,4 +261,27 @@ async def analyze_legal(payload: dict):
         raise HTTPException(
             status_code=500,
             detail="Ошибка юридического анализа",
+        )
+
+
+@app.post("/analysis/full")
+async def analyze_full(payload: dict):
+    document_text = payload.get("document_text")
+
+    if not isinstance(document_text, str) or not document_text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Document text is required",
+        )
+
+    try:
+        result = await analyze_full_tender(document_text)
+        return {
+            "message": "Full tender analysis completed",
+            "analysis": result,
+        }
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Ошибка полного анализа закупки",
         )

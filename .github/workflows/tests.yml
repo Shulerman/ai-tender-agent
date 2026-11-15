@@ -49,7 +49,9 @@ jobs:
             test_legal_full_integration.py \
             test_legal_confirmed_violation.py \
             test_legal_missing_basis.py \
-            test_legal_gemini_failure.py
+            test_legal_gemini_failure.py \
+            test_full_analyst.py \
+            test_full_api.py
           do
             echo ""
             echo "===== $test ====="
