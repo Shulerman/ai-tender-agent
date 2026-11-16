@@ -1,7 +1,8 @@
-fastapi
+﻿fastapi
 uvicorn[standard]
 python-dotenv
 httpx
+httpx2
 pydantic
 pydantic-settings
 sqlalchemy

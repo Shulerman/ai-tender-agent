@@ -1,5 +1,4 @@
-
-from pydantic_settings import BaseSettings
+﻿from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sqlalchemy import (
     create_engine,
@@ -21,8 +20,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     POSTGRES_PASSWORD: str
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(
+        env_file=".env"
+    )
 
 
 settings = Settings()
