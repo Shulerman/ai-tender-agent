@@ -1,17 +1,20 @@
-import asyncio
-from unittest.mock import AsyncMock, patch
+﻿from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.ai.full_analyst import analyze_full_tender
 
 
-async def main():
-    document_text = "Тестовая закупка: поставка бумажной продукции."
+@pytest.mark.asyncio
+async def test_full_analyst_success():
+    document_text = "Test procurement: paper supply."
 
     technical_result = {
-        "products": [{"name": "Бумага", "quantity": 100}]
+        "products": [{"name": "Paper", "quantity": 100}]
     }
+
     legal_result = {
-        "procurement_law": "44-ФЗ",
+        "procurement_law": "44-FZ",
         "risks": [],
     }
 
@@ -36,12 +39,9 @@ async def main():
         assert result["technical_analysis"] == technical_result
         assert result["legal_analysis"] == legal_result
 
-    print("ОСНОВНОЙ ТЕСТ ПРОЙДЕН")
-    print("1. Оба анализатора получили один исходный текст.")
-    print("2. Оба анализатора вызваны ровно один раз.")
-    print("3. Технический результат сохранён.")
-    print("4. Юридический результат сохранён.")
 
+@pytest.mark.asyncio
+async def test_full_analyst_rejects_empty_document():
     with patch(
         "app.ai.full_analyst.analyze_technical_requirements",
         new_callable=AsyncMock,
@@ -50,19 +50,8 @@ async def main():
         new_callable=AsyncMock,
     ) as legal_mock:
 
-        try:
+        with pytest.raises(ValueError):
             await analyze_full_tender("   ")
-        except ValueError as error:
-            assert str(error) == "Текст документа пуст"
-        else:
-            raise AssertionError("Пустой документ не был отклонён")
 
         technical_mock.assert_not_awaited()
         legal_mock.assert_not_awaited()
-
-    print("5. Пустой документ корректно отклоняется.")
-    print()
-    print("ТЕСТ ОБЪЕДИНЁННОГО АНАЛИЗАТОРА ПРОЙДЕН")
-
-
-asyncio.run(main())
