@@ -1,5 +1,4 @@
-
-import os
+﻿import os
 import asyncio
 import httpx
 
@@ -23,7 +22,7 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY не найден")
 
-    if not prompt.strip():
+    if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Текст запроса не должен быть пустым")
 
     headers = {
@@ -46,8 +45,6 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
             "responseMimeType": "application/json"
         }
 
-    last_error = None
-
     async with httpx.AsyncClient(timeout=90) as client:
 
         for attempt in range(3):
@@ -64,9 +61,10 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
                 break
 
             except httpx.HTTPStatusError as error:
-                last_error = error
 
-                if error.response.status_code not in (429, 500, 502, 503, 504):
+                if error.response.status_code not in (
+                    429, 500, 502, 503, 504
+                ):
                     raise RuntimeError(
                         f"Ошибка Gemini API: HTTP "
                         f"{error.response.status_code}"
@@ -79,7 +77,6 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
                     ) from error
 
             except (httpx.TimeoutException, httpx.NetworkError) as error:
-                last_error = error
 
                 if attempt == 2:
                     raise RuntimeError(
@@ -90,9 +87,14 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
             await asyncio.sleep(2 ** attempt)
 
     try:
-        return result["candidates"][0]["content"]["parts"][0]["text"]
+        text = result["candidates"][0]["content"]["parts"][0]["text"]
 
-    except (KeyError, IndexError, TypeError):
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Gemini вернул пустой текст")
+
+        return text
+
+    except (KeyError, IndexError, TypeError, ValueError) as error:
         raise RuntimeError(
             f"Gemini вернул неожиданный ответ: {result}"
-        )
+        ) from error

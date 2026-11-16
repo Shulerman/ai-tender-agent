@@ -1,20 +1,22 @@
+﻿from pydantic import BaseModel, Field, model_validator
 
-from pydantic import BaseModel, Field, model_validator
+
+NOT_SPECIFIED = "Не указано"
 
 
 class ProductAnalysis(BaseModel):
     name: str
     quantity: str
     unit: str
-    technical_characteristics: str = "Не указано"
-    packaging_requirements: str = "Не указано"
-    quality_and_standards: str = "Не указано"
+    technical_characteristics: str = NOT_SPECIFIED
+    packaging_requirements: str = NOT_SPECIFIED
+    quality_and_standards: str = NOT_SPECIFIED
     quotes: list[str] = Field(default_factory=list)
 
 
 class DeliveryRequirement(BaseModel):
-    delivery_time: str = "Не указано"
-    delivery_address: str = "Не указано"
+    delivery_time: str = NOT_SPECIFIED
+    delivery_address: str = NOT_SPECIFIED
     quotes: list[str] = Field(default_factory=list)
 
 
@@ -44,7 +46,7 @@ class Risk(BaseModel):
         if isinstance(value, str):
             return {
                 "description": value,
-                "quotes": []
+                "quotes": [],
             }
 
         return value
