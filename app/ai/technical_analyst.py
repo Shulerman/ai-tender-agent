@@ -7,9 +7,19 @@ from app.ai.evidence_validator import validate_quotes
 from app.ai.technical_models import TechnicalAnalysis
 
 
-def validate_analysis_evidence(analysis: TechnicalAnalysis, document_text: str) -> None:
+def validate_analysis_evidence(
+    analysis: TechnicalAnalysis,
+    document_text: str,
+) -> None:
     """
-    Проверяет цитаты во всех разделах технического анализа.
+    Проверяет наличие цитат в исходном документе.
+
+    Отдельно проверяет:
+    1. Общие цитаты разделов.
+    2. Цитаты, связанные с конкретными утверждениями.
+
+    Наличие цитаты не означает, что она подтверждает смысл утверждения.
+    Семантическая проверка будет реализована отдельно.
     """
 
     sections = [
@@ -33,11 +43,31 @@ def validate_analysis_evidence(analysis: TechnicalAnalysis, document_text: str) 
             else:
                 item.evidence_status = "Подтверждено"
 
+            for evidence in item.evidence:
+                quote_result = validate_quotes(
+                    [evidence.quote],
+                    document_text,
+                )
+
+                if quote_result["accepted"]:
+                    evidence.relevance_status = "Ожидает проверки"
+                    evidence.relevance_explanation = (
+                        "Цитата найдена в документе. "
+                        "Соответствие цитаты утверждению "
+                        "ещё не проверено."
+                    )
+                else:
+                    evidence.relevance_status = "Цитата не найдена"
+                    evidence.relevance_explanation = (
+                        "Указанная цитата отсутствует "
+                        "в исходном тексте документа."
+                    )
+
 
 async def analyze_technical_requirements(document_text: str) -> dict:
     """
     Анализирует техническое задание с помощью Gemini,
-    проверяет структуру результата и достоверность цитат.
+    проверяет структуру результата и наличие цитат в документе.
     """
 
     if not isinstance(document_text, str) or not document_text.strip():
@@ -64,10 +94,11 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 - technical_characteristics: технические характеристики;
 - packaging_requirements: требования к упаковке;
 - quality_and_standards: требования к качеству и стандартам;
-- quotes: точные цитаты из документа.
+- quotes: список точных цитат из документа;
+- evidence: список связок «утверждение — цитата».
 
-Не объединяй разные товары в одну позицию.
-Не теряй отдельные характеристики и дополнительные требования.
+В evidence каждое утверждение должно быть связано
+с отдельной точной цитатой, которая относится именно к нему.
 
 2. СРОКИ И УСЛОВИЯ ПОСТАВКИ
 
@@ -89,7 +120,8 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 Для каждого требования укажи:
 - delivery_time: срок поставки в исходной формулировке;
 - delivery_address: адрес поставки, если он указан;
-- quotes: точные цитаты из документа.
+- quotes: точные цитаты из документа;
+- evidence: отдельные связки «утверждение — цитата».
 
 3. ДОКУМЕНТЫ И ПОДТВЕРЖДЕНИЯ
 
@@ -103,7 +135,10 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 - лицензиям;
 - иным документам и подтверждениям.
 
-Для каждого требования укажи точные цитаты.
+Для каждого требования укажи:
+- requirement_type: тип требования;
+- quotes: точные цитаты;
+- evidence: связки «утверждение — цитата».
 
 4. РИСКИ И НЕОПРЕДЕЛЁННОСТИ
 
@@ -117,7 +152,10 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 - требования, которые могут ограничить круг поставщиков;
 - другие технические и организационные риски.
 
-Для каждого риска приведи подтверждающие цитаты.
+Для каждого риска укажи:
+- description: описание риска;
+- quotes: подтверждающие цитаты;
+- evidence: связки «утверждение о риске — цитата».
 
 Не называй требование нарушением закона.
 Юридическую оценку выполняет отдельный юридический анализатор.
@@ -146,8 +184,13 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 - Цитаты должны дословно присутствовать в исходном документе.
 - Не сокращай цитаты и не объединяй отдельные фрагменты документа
   в одну цитату.
-- Если подтверждающую цитату найти невозможно, оставь quotes пустым
-  списком. Не придумывай цитату.
+- Каждая запись evidence должна содержать одно конкретное утверждение
+  и одну относящуюся к нему цитату.
+- Не используй одну общую цитату для нескольких несвязанных утверждений.
+- Не утверждай, что цитата доказывает вывод, если связь неочевидна.
+- Если точную цитату найти невозможно, не создавай запись evidence.
+- Не выдумывай содержание цитат ради заполнения структуры.
+- Если цитата не найдена, оставь соответствующие списки пустыми.
 
 ФОРМАТ ОТВЕТА
 
@@ -157,10 +200,60 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 Структура:
 
 {{
-  "products": [],
-  "delivery_requirements": [],
-  "document_requirements": [],
-  "risks_and_uncertainties": [],
+  "products": [
+    {{
+      "name": "",
+      "quantity": "",
+      "unit": "",
+      "technical_characteristics": "",
+      "packaging_requirements": "",
+      "quality_and_standards": "",
+      "quotes": [],
+      "evidence": [
+        {{
+          "claim": "Конкретное утверждение",
+          "quote": "Дословная цитата из документа"
+        }}
+      ]
+    }}
+  ],
+  "delivery_requirements": [
+    {{
+      "delivery_time": "",
+      "delivery_address": "",
+      "quotes": [],
+      "evidence": [
+        {{
+          "claim": "Конкретное утверждение о сроке или условиях поставки",
+          "quote": "Дословная цитата из документа"
+        }}
+      ]
+    }}
+  ],
+  "document_requirements": [
+    {{
+      "requirement_type": "",
+      "quotes": [],
+      "evidence": [
+        {{
+          "claim": "Конкретное требование к документу",
+          "quote": "Дословная цитата из документа"
+        }}
+      ]
+    }}
+  ],
+  "risks_and_uncertainties": [
+    {{
+      "description": "",
+      "quotes": [],
+      "evidence": [
+        {{
+          "claim": "Конкретное утверждение о риске",
+          "quote": "Дословная цитата из документа"
+        }}
+      ]
+    }}
+  ],
   "questions_to_customer": []
 }}
 
