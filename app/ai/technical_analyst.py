@@ -3,13 +3,41 @@
 from pydantic import ValidationError
 
 from app.ai.gemini import generate_text
+from app.ai.evidence_validator import validate_quotes
 from app.ai.technical_models import TechnicalAnalysis
+
+
+def validate_analysis_evidence(analysis: TechnicalAnalysis, document_text: str) -> None:
+    """
+    Проверяет цитаты во всех разделах технического анализа.
+    """
+
+    sections = [
+        analysis.products,
+        analysis.delivery_requirements,
+        analysis.document_requirements,
+        analysis.risks_and_uncertainties,
+    ]
+
+    for section in sections:
+        for item in section:
+            result = validate_quotes(item.quotes, document_text)
+
+            item.quotes = result["accepted"]
+            item.rejected_quotes = result["rejected"]
+
+            if not item.quotes:
+                item.evidence_status = "Не подтверждено"
+            elif item.rejected_quotes:
+                item.evidence_status = "Частично подтверждено"
+            else:
+                item.evidence_status = "Подтверждено"
 
 
 async def analyze_technical_requirements(document_text: str) -> dict:
     """
-    Анализирует техническое задание закупки с помощью Gemini
-    и проверяет структуру результата через Pydantic.
+    Анализирует техническое задание с помощью Gemini,
+    проверяет структуру результата и достоверность цитат.
     """
 
     if not isinstance(document_text, str) or not document_text.strip():
@@ -115,6 +143,11 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 - Если сведения отсутствуют, используй значение «Не указано».
 - Если требование сформулировано неоднозначно, сохрани исходную
   формулировку и отрази неопределённость в рисках.
+- Цитаты должны дословно присутствовать в исходном документе.
+- Не сокращай цитаты и не объединяй отдельные фрагменты документа
+  в одну цитату.
+- Если подтверждающую цитату найти невозможно, оставь quotes пустым
+  списком. Не придумывай цитату.
 
 ФОРМАТ ОТВЕТА
 
@@ -163,5 +196,7 @@ async def analyze_technical_requirements(document_text: str) -> dict:
             "Gemini вернул данные неправильной структуры: "
             f"{error}"
         ) from error
+
+    validate_analysis_evidence(validated_result, document_text)
 
     return validated_result.model_dump()

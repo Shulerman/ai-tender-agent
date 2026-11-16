@@ -2,6 +2,7 @@
 
 
 NOT_SPECIFIED = "Не указано"
+EVIDENCE_NOT_CHECKED = "Не проверено"
 
 
 class ProductAnalysis(BaseModel):
@@ -12,17 +13,23 @@ class ProductAnalysis(BaseModel):
     packaging_requirements: str = NOT_SPECIFIED
     quality_and_standards: str = NOT_SPECIFIED
     quotes: list[str] = Field(default_factory=list)
+    evidence_status: str = EVIDENCE_NOT_CHECKED
+    rejected_quotes: list[str] = Field(default_factory=list)
 
 
 class DeliveryRequirement(BaseModel):
     delivery_time: str = NOT_SPECIFIED
     delivery_address: str = NOT_SPECIFIED
     quotes: list[str] = Field(default_factory=list)
+    evidence_status: str = EVIDENCE_NOT_CHECKED
+    rejected_quotes: list[str] = Field(default_factory=list)
 
 
 class DocumentRequirement(BaseModel):
     requirement_type: str
     quotes: list[str] = Field(default_factory=list)
+    evidence_status: str = EVIDENCE_NOT_CHECKED
+    rejected_quotes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
@@ -39,6 +46,8 @@ class DocumentRequirement(BaseModel):
 class Risk(BaseModel):
     description: str
     quotes: list[str] = Field(default_factory=list)
+    evidence_status: str = EVIDENCE_NOT_CHECKED
+    rejected_quotes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
     @classmethod
