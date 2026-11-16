@@ -11,3 +11,4 @@ python-telegram-bot
 pypdf
 python-multipart
 python-docx
+pytest
