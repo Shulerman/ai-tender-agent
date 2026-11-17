@@ -15,6 +15,15 @@ from app.database import (
     LegalProvisionDB,
 )
 
+from app.commercial.models import (
+    ManufacturerDB,
+    SupplierDB,
+    PriceListImportDB,
+    PriceListImportRowDB,
+    ProductDB,
+    SupplierOfferDB,
+)
+
 VERSION_ID = "44-FZ-2026-10-01"
 
 TEST_ARTICLES = [

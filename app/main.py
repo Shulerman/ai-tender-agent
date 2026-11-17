@@ -1,3 +1,8 @@
+import hashlib
+import json
+import tempfile
+import uuid
+from pathlib import Path
 
 from fastapi import (
     FastAPI,
@@ -5,6 +10,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
     File,
+    Form,
 )
 from sqlalchemy.orm import Session
 
@@ -21,6 +27,10 @@ from app.ai.technical_analyst import analyze_technical_requirements
 from app.ai.legal_analyst import analyze_legal_requirements
 from app.ai.full_analyst import analyze_full_tender
 
+from app.commercial.models import SupplierDB
+from app.commercial.excel_importer import inspect_price_list
+from app.commercial.import_service import import_price_list
+
 
 app = FastAPI(
     title="AI Tender Agent",
@@ -29,12 +39,54 @@ app = FastAPI(
 )
 
 
+COMMERCIAL_PRICE_LISTS_DIR = Path("data/commercial/price_lists")
+ALLOWED_EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
+
+
 def get_db():
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
+
+
+def _get_excel_filename(file: UploadFile) -> tuple[str, str]:
+    """Проверяет имя и расширение загруженного Excel-файла."""
+
+    original_name = Path(
+        (file.filename or "").replace("\\", "/")
+    ).name
+
+    if not original_name or original_name in {".", ".."}:
+        raise ValueError("Не указано имя Excel-файла")
+
+    extension = Path(original_name).suffix.lower()
+
+    if extension not in ALLOWED_EXCEL_EXTENSIONS:
+        raise ValueError(
+            "Поддерживаются только файлы XLSX и XLSM"
+        )
+
+    return original_name, extension
+
+
+def _read_column_mapping(mapping_json: str) -> dict:
+    """Преобразует JSON сопоставления столбцов в словарь."""
+
+    try:
+        mapping = json.loads(mapping_json)
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError(
+            "column_mapping должен содержать корректный JSON"
+        )
+
+    if not isinstance(mapping, dict):
+        raise ValueError(
+            "column_mapping должен быть JSON-объектом"
+        )
+
+    return mapping
 
 
 @app.get("/")
@@ -96,6 +148,167 @@ async def upload_document(file: UploadFile = File(...)):
             status_code=500,
             detail="Ошибка при обработке документа",
         )
+
+
+@app.post("/commercial/imports/excel/preview")
+async def preview_excel_price_list(
+    file: UploadFile = File(...),
+    header_row: int = Form(default=1),
+    sheet_name: str | None = Form(default=None),
+):
+    """
+    Предварительно анализирует Excel-прайс.
+
+    Не сохраняет файл постоянно и не изменяет базу данных.
+    Возвращает структуру книги и предлагаемое сопоставление столбцов.
+    """
+
+    temporary_path = None
+
+    try:
+        original_name, extension = _get_excel_filename(file)
+
+        content = await file.read()
+
+        if not content:
+            raise ValueError("Загруженный файл пуст")
+
+        with tempfile.NamedTemporaryFile(
+            suffix=extension,
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(content)
+            temporary_path = Path(temporary_file.name)
+
+        result = inspect_price_list(
+            temporary_path,
+            sheet_name=sheet_name,
+            header_row=header_row,
+        )
+
+        result["file_name"] = original_name
+        result["size_bytes"] = len(content)
+
+        return {
+            "message": "Предварительный просмотр Excel выполнен",
+            "preview": result,
+        }
+
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Не удалось прочитать Excel-файл",
+        )
+
+    finally:
+        await file.close()
+
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+@app.post("/commercial/imports/excel")
+async def upload_excel_price_list(
+    supplier_id: int = Form(...),
+    file: UploadFile = File(...),
+    column_mapping: str = Form(...),
+    header_row: int = Form(default=1),
+    sheet_name: str | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
+    """
+    Сохраняет и импортирует Excel-прайс поставщика.
+
+    Файл сохраняется отдельно от документов тендера.
+    Все операции импорта выполняются сервисом одной транзакцией.
+    """
+
+    saved_directory = None
+
+    try:
+        supplier = db.get(SupplierDB, supplier_id)
+
+        if supplier is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Поставщик не найден",
+            )
+
+        original_name, extension = _get_excel_filename(file)
+
+        mapping = _read_column_mapping(column_mapping)
+
+        content = await file.read()
+
+        if not content:
+            raise ValueError("Загруженный файл пуст")
+
+        file_hash = hashlib.sha256(content).hexdigest()
+
+        unique_directory = uuid.uuid4().hex
+        saved_directory = (
+            COMMERCIAL_PRICE_LISTS_DIR / unique_directory
+        )
+
+        saved_directory.mkdir(
+            parents=True,
+            exist_ok=False,
+        )
+
+        saved_path = saved_directory / original_name
+        saved_path.write_bytes(content)
+
+        result = import_price_list(
+            db,
+            supplier_id=supplier_id,
+            file_path=str(saved_path),
+            column_mapping=mapping,
+            header_row=header_row,
+            sheet_name=sheet_name,
+            file_hash=file_hash,
+        )
+
+        return {
+            "message": "Импорт прайс-листа завершён",
+            "original_name": original_name,
+            "file_hash": file_hash,
+            "result": result,
+        }
+
+    except HTTPException:
+        if saved_directory is not None:
+            import shutil
+            shutil.rmtree(saved_directory, ignore_errors=True)
+        raise
+
+    except (ValueError, FileNotFoundError) as exc:
+        if saved_directory is not None:
+            import shutil
+            shutil.rmtree(saved_directory, ignore_errors=True)
+
+        raise HTTPException(
+            status_code=400,
+            detail=str(exc),
+        )
+
+    except Exception:
+        if saved_directory is not None:
+            import shutil
+            shutil.rmtree(saved_directory, ignore_errors=True)
+
+        raise HTTPException(
+            status_code=500,
+            detail="Ошибка при импорте прайс-листа",
+        )
+
+    finally:
+        await file.close()
 
 
 @app.post("/tenders")

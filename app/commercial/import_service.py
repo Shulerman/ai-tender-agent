@@ -1,0 +1,373 @@
+import re
+from datetime import date, datetime
+from decimal import Decimal
+
+from openpyxl import load_workbook
+from sqlalchemy.orm import Session
+
+from app.commercial.excel_importer import parse_price_list
+from app.commercial.models import (
+    ProductDB,
+    PriceListImportDB,
+    PriceListImportRowDB,
+    SupplierDB,
+    SupplierOfferDB,
+)
+
+
+def _normalize(value):
+    """Нормализует строки для точного сопоставления."""
+
+    if value is None:
+        return ""
+
+    text = str(value).strip().casefold().replace("ё", "е")
+    return re.sub(r"\s+", " ", text)
+
+
+def _json_safe(value):
+    """Преобразует значения Excel в типы, совместимые с JSON."""
+
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe(item)
+            for key, item in value.items()
+        }
+
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+
+    if isinstance(value, Decimal):
+        return str(value)
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    return str(value)
+
+
+def _get_raw_rows(file_path, sheet_name, source_rows):
+    """Читает исходные значения Excel для сохранения строк."""
+
+    workbook = load_workbook(
+        filename=file_path,
+        read_only=True,
+        data_only=True,
+    )
+
+    try:
+        if sheet_name not in workbook.sheetnames:
+            raise ValueError(
+                f"Лист Excel не найден: {sheet_name}"
+            )
+
+        worksheet = workbook[sheet_name]
+        result = {}
+
+        for row_number in source_rows:
+            result[row_number] = _json_safe(
+                list(
+                    next(
+                        worksheet.iter_rows(
+                            min_row=row_number,
+                            max_row=row_number,
+                            values_only=True,
+                        ),
+                        (),
+                    )
+                )
+            )
+
+        return result
+
+    finally:
+        workbook.close()
+
+
+def _get_mapped_value(raw_values, column_mapping, field):
+    """Получает исходное значение по номеру столбца из mapping."""
+
+    column_number = column_mapping.get(field)
+
+    if (
+        not isinstance(column_number, int)
+        or isinstance(column_number, bool)
+        or column_number < 1
+    ):
+        return None
+
+    index = column_number - 1
+
+    if index >= len(raw_values):
+        return None
+
+    value = raw_values[index]
+
+    if value is None:
+        return None
+
+    return str(value).strip() or None
+
+
+def _find_existing_product(products, article_number, name):
+    """
+    Ищет существующий товар.
+
+    Приоритет:
+    1. Точное нормализованное совпадение артикула.
+    2. Если по артикулу нет совпадений — точное совпадение названия.
+
+    Несколько совпадений не разрешаются автоматически.
+    """
+
+    normalized_article = _normalize(article_number)
+
+    if normalized_article:
+        article_matches = [
+            product
+            for product in products
+            if _normalize(product.article_number) == normalized_article
+        ]
+
+        if len(article_matches) == 1:
+            return article_matches[0]
+
+        if len(article_matches) > 1:
+            return None
+
+    normalized_name = _normalize(name)
+
+    if not normalized_name:
+        return None
+
+    name_matches = [
+        product
+        for product in products
+        if _normalize(product.name) == normalized_name
+    ]
+
+    if len(name_matches) == 1:
+        return name_matches[0]
+
+    return None
+
+
+def import_price_list(
+    db: Session,
+    *,
+    supplier_id: int,
+    file_path: str,
+    column_mapping: dict,
+    header_row: int = 1,
+    sheet_name: str = None,
+    file_hash: str = None,
+):
+    """
+    Импортирует Excel-прайс поставщика одной транзакцией.
+
+    Новые товары автоматически не создаются.
+    Предложения создаются только для однозначно найденных товаров.
+    """
+
+    supplier = db.get(SupplierDB, supplier_id)
+
+    if supplier is None:
+        raise ValueError("Поставщик не найден")
+
+    if not isinstance(file_path, str) or not file_path.strip():
+        raise ValueError("Путь к файлу не должен быть пустым")
+
+    if not isinstance(column_mapping, dict):
+        raise ValueError("column_mapping должен быть словарём")
+
+    parsed = parse_price_list(
+        file_path,
+        column_mapping=column_mapping,
+        sheet_name=sheet_name,
+        header_row=header_row,
+    )
+
+    selected_sheet = parsed["sheet_name"]
+    items = parsed["items"]
+    errors = parsed["errors"]
+
+    source_numbers = {
+        item["source_row"]
+        for item in items
+    }
+
+    source_numbers.update(
+        item["source_row"]
+        for item in errors
+    )
+
+    raw_rows = _get_raw_rows(
+        file_path,
+        selected_sheet,
+        source_numbers,
+    )
+
+    products = db.query(ProductDB).all()
+    now = datetime.now()
+
+    import_record = PriceListImportDB(
+        supplier_id=supplier_id,
+        file_name=parsed["file_name"],
+        file_path=file_path,
+        file_hash=file_hash,
+        sheet_name=selected_sheet,
+        header_row=header_row,
+        column_mapping=column_mapping,
+        status="В обработке",
+        total_rows=len(items) + len(errors),
+        imported_rows=0,
+        error_rows=0,
+        errors=None,
+        created_at=now,
+    )
+
+    created_offers = 0
+    saved_rows = 0
+    saved_errors = []
+
+    try:
+        db.add(import_record)
+        db.flush()
+
+        for item in items:
+            source_row = item["source_row"]
+            raw_values = raw_rows.get(source_row, [])
+
+            product = _find_existing_product(
+                products,
+                item.get("article_number"),
+                item.get("name"),
+            )
+
+            row_status = (
+                "Сопоставлен"
+                if product is not None
+                else "Требует сопоставления"
+            )
+
+            import_row = PriceListImportRowDB(
+                import_id=import_record.id,
+                source_row=source_row,
+                source_values=raw_values,
+                source_name=item.get("source_name") or item.get("name"),
+                source_article_number=(
+                    item.get("source_article_number")
+                    or item.get("article_number")
+                ),
+                price=item["price"],
+                currency=item.get("currency") or "RUB",
+                unit=item.get("unit"),
+                available_quantity=item.get("available_quantity"),
+                valid_until=item.get("valid_until"),
+                delivery_time_days=item.get("delivery_time_days"),
+                product_id=product.id if product is not None else None,
+                status=row_status,
+                error=None,
+                created_at=now,
+            )
+
+            db.add(import_row)
+            saved_rows += 1
+
+            if product is None:
+                continue
+
+            source_reference = (
+                f'{parsed["file_name"]}; '
+                f'лист: {selected_sheet}; '
+                f'строка: {source_row}'
+            )
+
+            offer = SupplierOfferDB(
+                supplier_id=supplier_id,
+                import_id=import_record.id,
+                product_id=product.id,
+                price=item["price"],
+                currency=item.get("currency") or "RUB",
+                available_quantity=item.get("available_quantity"),
+                availability_status=None,
+                delivery_time_days=item.get("delivery_time_days"),
+                received_at=now,
+                valid_until=item.get("valid_until"),
+                source_type="Excel",
+                source_reference=source_reference,
+                verification_status="Не проверено",
+            )
+
+            db.add(offer)
+            created_offers += 1
+
+        for error_item in errors:
+            source_row = error_item["source_row"]
+            raw_values = raw_rows.get(source_row, [])
+
+            import_row = PriceListImportRowDB(
+                import_id=import_record.id,
+                source_row=source_row,
+                source_values=raw_values,
+                source_name=_get_mapped_value(
+                    raw_values,
+                    column_mapping,
+                    "name",
+                ),
+                source_article_number=_get_mapped_value(
+                    raw_values,
+                    column_mapping,
+                    "article_number",
+                ),
+                price=None,
+                currency=None,
+                unit=None,
+                available_quantity=None,
+                valid_until=None,
+                delivery_time_days=None,
+                product_id=None,
+                status="Ошибка",
+                error=error_item["error"],
+                created_at=now,
+            )
+
+            db.add(import_row)
+
+            saved_errors.append(
+                _json_safe(error_item)
+            )
+
+        import_record.imported_rows = saved_rows
+        import_record.error_rows = len(errors)
+        import_record.errors = saved_errors
+        import_record.status = (
+            "Завершён с ошибками"
+            if errors
+            else "Завершён"
+        )
+        import_record.completed_at = datetime.now()
+
+        db.commit()
+        db.refresh(import_record)
+
+        return {
+            "import_id": import_record.id,
+            "supplier_id": supplier_id,
+            "file_name": import_record.file_name,
+            "sheet_name": selected_sheet,
+            "status": import_record.status,
+            "total_rows": import_record.total_rows,
+            "imported_rows": import_record.imported_rows,
+            "error_rows": import_record.error_rows,
+            "matched_offers": created_offers,
+            "unmatched_rows": saved_rows - created_offers,
+            "errors": saved_errors,
+        }
+
+    except Exception:
+        db.rollback()
+        raise
