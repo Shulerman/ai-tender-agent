@@ -371,3 +371,86 @@ def import_price_list(
     except Exception:
         db.rollback()
         raise
+def match_import_row(
+    db,
+    *,
+    import_id: int,
+    row_id: int,
+    product_id: int,
+):
+    """Вручную связывает строку импорта с товаром каталога."""
+
+    try:
+        import_record = (
+            db.query(PriceListImportDB)
+            .filter(PriceListImportDB.id == import_id)
+            .first()
+        )
+        if import_record is None:
+            raise ValueError("Импорт не найден.")
+
+        import_row = (
+            db.query(PriceListImportRowDB)
+            .filter(
+                PriceListImportRowDB.id == row_id,
+                PriceListImportRowDB.import_id == import_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if import_row is None:
+            raise ValueError("Строка не найдена в указанном импорте.")
+
+        if import_row.status != "Требует сопоставления":
+            raise ValueError("Строка уже обработана или не требует сопоставления.")
+
+        product = (
+            db.query(ProductDB)
+            .filter(ProductDB.id == product_id)
+            .first()
+        )
+        if product is None:
+            raise ValueError("Товар каталога не найден.")
+
+        if import_row.price is None:
+            raise ValueError("Нельзя создать предложение: в строке отсутствует цена.")
+
+        offer = SupplierOfferDB(
+            supplier_id=import_record.supplier_id,
+            import_id=import_record.id,
+            product_id=product.id,
+            price=import_row.price,
+            currency=import_row.currency or "RUB",
+            available_quantity=import_row.available_quantity,
+            delivery_time_days=import_row.delivery_time_days,
+            received_at=datetime.now(),
+            valid_until=import_row.valid_until,
+            source_type="Excel",
+            source_reference=(
+                f"{import_record.file_name}; "
+                f"лист: {import_record.sheet_name or 'не указан'}; "
+                f"строка: {import_row.source_row}"
+            ),
+            verification_status="Не проверено",
+        )
+
+        import_row.product_id = product.id
+        import_row.status = "Сопоставлен"
+        import_row.error = None
+
+        db.add(offer)
+        db.commit()
+        db.refresh(offer)
+        db.refresh(import_row)
+
+        return {
+            "import_id": import_record.id,
+            "row_id": import_row.id,
+            "product_id": product.id,
+            "offer_id": offer.id,
+            "status": import_row.status,
+        }
+
+    except Exception:
+        db.rollback()
+        raise

@@ -27,9 +27,17 @@ from app.ai.technical_analyst import analyze_technical_requirements
 from app.ai.legal_analyst import analyze_legal_requirements
 from app.ai.full_analyst import analyze_full_tender
 
-from app.commercial.models import SupplierDB
+from app.commercial.models import (
+    SupplierDB,
+    ProductDB,
+    PriceListImportDB,
+    PriceListImportRowDB,
+)
 from app.commercial.excel_importer import inspect_price_list
-from app.commercial.import_service import import_price_list
+from app.commercial.import_service import (
+    import_price_list,
+    match_import_row,
+)
 
 
 app = FastAPI(
@@ -310,6 +318,133 @@ async def upload_excel_price_list(
     finally:
         await file.close()
 
+
+
+@app.get("/commercial/imports/{import_id}/unmatched")
+def get_unmatched_import_rows(
+    import_id: int,
+    db: Session = Depends(get_db),
+):
+    """Возвращает строки импорта, ожидающие ручного сопоставления."""
+
+    import_record = db.get(PriceListImportDB, import_id)
+
+    if import_record is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Импорт не найден",
+        )
+
+    rows = (
+        db.query(PriceListImportRowDB)
+        .filter(
+            PriceListImportRowDB.import_id == import_id,
+            PriceListImportRowDB.status == "Требует сопоставления",
+        )
+        .order_by(PriceListImportRowDB.source_row.asc())
+        .all()
+    )
+
+    return {
+        "import_id": import_id,
+        "count": len(rows),
+        "rows": [
+            {
+                "row_id": row.id,
+                "source_row": row.source_row,
+                "article_number": row.source_article_number,
+                "name": row.source_name,
+                "price": row.price,
+                "currency": row.currency,
+                "unit": row.unit,
+                "available_quantity": row.available_quantity,
+                "delivery_time_days": row.delivery_time_days,
+                "valid_until": row.valid_until,
+                "status": row.status,
+            }
+            for row in rows
+        ],
+    }
+
+
+@app.post("/commercial/imports/{import_id}/rows/{row_id}/match")
+def manually_match_import_row(
+    import_id: int,
+    row_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Связывает строку импорта с существующим товаром каталога."""
+
+    product_id = payload.get("product_id")
+
+    if (
+        not isinstance(product_id, int)
+        or isinstance(product_id, bool)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="product_id должен быть целым числом",
+        )
+
+    import_record = db.get(PriceListImportDB, import_id)
+
+    if import_record is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Импорт не найден",
+        )
+
+    import_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(
+            id=row_id,
+            import_id=import_id,
+        )
+        .first()
+    )
+
+    if import_row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Строка не найдена в указанном импорте",
+        )
+
+    if import_row.status != "Требует сопоставления":
+        raise HTTPException(
+            status_code=409,
+            detail="Строка уже обработана или не требует сопоставления",
+        )
+
+    if db.get(ProductDB, product_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Товар каталога не найден",
+        )
+
+    if import_row.price is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Нельзя создать предложение: в строке отсутствует цена",
+        )
+
+    try:
+        result = match_import_row(
+            db,
+            import_id=import_id,
+            row_id=row_id,
+            product_id=product_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=str(exc),
+        )
+
+    return {
+        "message": "Строка успешно сопоставлена",
+        "result": result,
+    }
 
 @app.post("/tenders")
 def create_tender(

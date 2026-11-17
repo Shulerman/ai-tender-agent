@@ -13,7 +13,7 @@ from app.commercial.models import (
     SupplierDB,
     SupplierOfferDB,
 )
-from app.commercial.import_service import import_price_list
+from app.commercial.import_service import import_price_list, match_import_row
 
 
 @pytest.fixture
@@ -341,4 +341,184 @@ def test_import_rolls_back_on_commit_error(
     assert db.query(SupplierOfferDB).filter_by(
         product_id=product.id,
         supplier_id=supplier.id,
+    ).count() == 0
+def test_manual_match_creates_supplier_offer(
+    db,
+    test_id,
+    tmp_path,
+):
+    supplier = create_supplier(db, test_id)
+    product = create_product(
+        db,
+        test_id,
+        f"Товар для ручного сопоставления {test_id}",
+        f"MANUAL-{test_id}",
+    )
+
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            ["UNKNOWN-001", "Новый товар из прайса", 725.50, "RUB", "шт."],
+        ],
+    )
+    result = run_import(db, supplier, file_path)
+
+    import_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=result["import_id"])
+        .one()
+    )
+    assert import_row.status == "Требует сопоставления"
+
+    match_result = match_import_row(
+        db,
+        import_id=result["import_id"],
+        row_id=import_row.id,
+        product_id=product.id,
+    )
+
+    db.refresh(import_row)
+    offers = (
+        db.query(SupplierOfferDB)
+        .filter_by(
+            import_id=result["import_id"],
+            supplier_id=supplier.id,
+            product_id=product.id,
+        )
+        .all()
+    )
+
+    assert match_result["status"] == "Сопоставлен"
+    assert match_result["product_id"] == product.id
+    assert import_row.product_id == product.id
+    assert import_row.status == "Сопоставлен"
+    assert len(offers) == 1
+    assert offers[0].price == Decimal("725.50")
+    assert offers[0].currency == "RUB"
+    assert offers[0].verification_status == "Не проверено"
+
+
+def test_manual_match_rejects_unknown_product(
+    db,
+    test_id,
+    tmp_path,
+):
+    supplier = create_supplier(db, test_id)
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            ["UNKNOWN-002", "Товар без сопоставления", 100, "RUB", "шт."],
+        ],
+    )
+    result = run_import(db, supplier, file_path)
+
+    import_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=result["import_id"])
+        .one()
+    )
+
+    with pytest.raises(ValueError, match="Товар каталога не найден"):
+        match_import_row(
+            db,
+            import_id=result["import_id"],
+            row_id=import_row.id,
+            product_id=-999999,
+        )
+
+    db.refresh(import_row)
+    assert import_row.status == "Требует сопоставления"
+    assert import_row.product_id is None
+    assert db.query(SupplierOfferDB).filter_by(
+        import_id=result["import_id"],
+    ).count() == 0
+
+
+def test_manual_match_rejects_already_matched_row(
+    db,
+    test_id,
+    tmp_path,
+):
+    supplier = create_supplier(db, test_id)
+    product = create_product(
+        db,
+        test_id,
+        f"Товар для повторного сопоставления {test_id}",
+    )
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            ["UNKNOWN-003", "Повторное сопоставление", 250, "RUB", "шт."],
+        ],
+    )
+    result = run_import(db, supplier, file_path)
+
+    import_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=result["import_id"])
+        .one()
+    )
+
+    match_import_row(
+        db,
+        import_id=result["import_id"],
+        row_id=import_row.id,
+        product_id=product.id,
+    )
+
+    with pytest.raises(ValueError, match="уже обработана"):
+        match_import_row(
+            db,
+            import_id=result["import_id"],
+            row_id=import_row.id,
+            product_id=product.id,
+        )
+
+    assert db.query(SupplierOfferDB).filter_by(
+        import_id=result["import_id"],
+        product_id=product.id,
+    ).count() == 1
+
+
+def test_manual_match_rejects_row_without_price(
+    db,
+    test_id,
+    tmp_path,
+):
+    supplier = create_supplier(db, test_id)
+    product = create_product(
+        db,
+        test_id,
+        f"Товар для строки без цены {test_id}",
+    )
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            ["UNKNOWN-004", "Товар без цены", 100, "RUB", "шт."],
+        ],
+    )
+    result = run_import(db, supplier, file_path)
+
+    import_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=result["import_id"])
+        .one()
+    )
+
+    import_row.price = None
+    db.commit()
+
+    with pytest.raises(ValueError, match="отсутствует цена"):
+        match_import_row(
+            db,
+            import_id=result["import_id"],
+            row_id=import_row.id,
+            product_id=product.id,
+        )
+
+    db.refresh(import_row)
+    assert import_row.status == "Требует сопоставления"
+    assert import_row.product_id is None
+    assert db.query(SupplierOfferDB).filter_by(
+        import_id=result["import_id"],
     ).count() == 0
