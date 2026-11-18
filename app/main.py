@@ -30,6 +30,7 @@ from app.ai.full_analyst import analyze_full_tender
 from app.commercial.models import (
     SupplierDB,
     ProductDB,
+    ManufacturerDB,
     PriceListImportDB,
     PriceListImportRowDB,
 )
@@ -318,6 +319,77 @@ async def upload_excel_price_list(
     finally:
         await file.close()
 
+
+
+@app.get("/commercial/products/search")
+def search_commercial_products(
+    q: str,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+):
+    """Ищет товары каталога по названию и артикулу."""
+
+    search_term = q.strip().casefold()
+
+    if not search_term:
+        raise HTTPException(
+            status_code=422,
+            detail="Поисковый запрос не может быть пустым",
+        )
+
+    if len(search_term) > 500:
+        raise HTTPException(
+            status_code=422,
+            detail="Поисковый запрос не должен превышать 500 символов",
+        )
+
+    if limit < 1 or limit > 50:
+        raise HTTPException(
+            status_code=422,
+            detail="limit должен быть от 1 до 50",
+        )
+
+    products = (
+        db.query(ProductDB, ManufacturerDB)
+        .outerjoin(
+            ManufacturerDB,
+            ProductDB.manufacturer_id == ManufacturerDB.id,
+        )
+        .order_by(ProductDB.id.asc())
+        .all()
+    )
+
+    exact_matches = []
+    partial_matches = []
+
+    for product, manufacturer in products:
+        name = (product.name or "").casefold()
+        article = (product.article_number or "").casefold()
+
+        if search_term == name or search_term == article:
+            exact_matches.append((product, manufacturer))
+        elif search_term in name or search_term in article:
+            partial_matches.append((product, manufacturer))
+
+    matches = (exact_matches + partial_matches)[:limit]
+
+    return {
+        "query": q.strip(),
+        "count": len(matches),
+        "limit": limit,
+        "products": [
+            {
+                "id": product.id,
+                "name": product.name,
+                "article_number": product.article_number,
+                "manufacturer": manufacturer.name if manufacturer else None,
+                "manufacturer_country": manufacturer.country if manufacturer else None,
+                "unit": product.unit,
+                "category": product.category,
+            }
+            for product, manufacturer in matches
+        ],
+    }
 
 
 @app.get("/commercial/imports/{import_id}/unmatched")
