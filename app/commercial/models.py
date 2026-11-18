@@ -110,6 +110,43 @@ class ProductDB(Base):
     created_at = Column(DateTime, nullable=True)
 
 
+class SupplierProductMappingDB(Base):
+    """Постоянная связь артикула поставщика с товаром каталога."""
+
+    __tablename__ = "supplier_product_mappings"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "supplier_id",
+            "normalized_supplier_article_number",
+            name="uq_supplier_product_mapping_article",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    supplier_id = Column(
+        Integer,
+        ForeignKey("suppliers.id"),
+        nullable=False,
+        index=True,
+    )
+
+    supplier_article_number = Column(String, nullable=False)
+    normalized_supplier_article_number = Column(String, nullable=False)
+
+    product_id = Column(
+        Integer,
+        ForeignKey("products.id"),
+        nullable=False,
+        index=True,
+    )
+
+    supplier_product_name = Column(String, nullable=True)
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+
 class PriceListImportRowDB(Base):
     """Отдельная строка импортированного прайс-листа."""
 

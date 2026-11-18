@@ -22,6 +22,7 @@ from app.commercial.models import (
     PriceListImportRowDB,
     ProductDB,
     SupplierOfferDB,
+    SupplierProductMappingDB,
 )
 
 VERSION_ID = "44-FZ-2026-10-01"

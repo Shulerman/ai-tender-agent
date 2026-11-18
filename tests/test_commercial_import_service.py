@@ -12,6 +12,7 @@ from app.commercial.models import (
     PriceListImportRowDB,
     SupplierDB,
     SupplierOfferDB,
+    SupplierProductMappingDB,
 )
 from app.commercial.import_service import import_price_list, match_import_row
 
@@ -521,4 +522,330 @@ def test_manual_match_rejects_row_without_price(
     assert import_row.product_id is None
     assert db.query(SupplierOfferDB).filter_by(
         import_id=result["import_id"],
+    ).count() == 0
+
+
+def test_manual_match_creates_supplier_product_mapping(
+    db,
+    test_id,
+    tmp_path,
+):
+    supplier = create_supplier(db, test_id)
+    product = create_product(
+        db,
+        test_id,
+        f"Товар для постоянного сопоставления {test_id}",
+    )
+
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            ["  ABC-001  ", "Товар поставщика", 500, "RUB", "шт."],
+        ],
+    )
+    result = run_import(db, supplier, file_path)
+
+    import_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=result["import_id"])
+        .one()
+    )
+
+    match_import_row(
+        db,
+        import_id=result["import_id"],
+        row_id=import_row.id,
+        product_id=product.id,
+    )
+
+    mapping = (
+        db.query(SupplierProductMappingDB)
+        .filter_by(
+            supplier_id=supplier.id,
+            normalized_supplier_article_number="abc-001",
+        )
+        .one()
+    )
+
+    assert mapping.supplier_article_number == "ABC-001"
+    assert mapping.product_id == product.id
+    assert mapping.supplier_product_name == "Товар поставщика"
+
+
+def test_manual_match_rejects_supplier_article_remapping(
+    db,
+    test_id,
+    tmp_path,
+):
+    supplier = create_supplier(db, test_id)
+    product_a = create_product(
+        db,
+        test_id,
+        f"Первый товар {test_id}",
+    )
+    product_b = create_product(
+        db,
+        test_id,
+        f"Второй товар {test_id}",
+    )
+
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            ["CONFLICT-001", "Товар поставщика", 500, "RUB", "шт."],
+            ["CONFLICT-001", "Товар поставщика", 550, "RUB", "шт."],
+        ],
+    )
+    result = run_import(db, supplier, file_path)
+
+    rows = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=result["import_id"])
+        .order_by(PriceListImportRowDB.source_row)
+        .all()
+    )
+
+    assert len(rows) == 2
+
+    match_import_row(
+        db,
+        import_id=result["import_id"],
+        row_id=rows[0].id,
+        product_id=product_a.id,
+    )
+
+    with pytest.raises(ValueError, match="уже связан с другим"):
+        match_import_row(
+            db,
+            import_id=result["import_id"],
+            row_id=rows[1].id,
+            product_id=product_b.id,
+        )
+
+    mapping = (
+        db.query(SupplierProductMappingDB)
+        .filter_by(
+            supplier_id=supplier.id,
+            normalized_supplier_article_number="conflict-001",
+        )
+        .one()
+    )
+
+    db.refresh(rows[1])
+
+    assert mapping.product_id == product_a.id
+    assert rows[1].status == "Требует сопоставления"
+    assert rows[1].product_id is None
+
+    assert db.query(SupplierOfferDB).filter_by(
+        import_id=result["import_id"],
+    ).count() == 1
+
+
+def test_reimport_uses_supplier_product_mapping(
+    db,
+    test_id,
+    tmp_path,
+):
+    supplier = create_supplier(db, test_id)
+    product = create_product(
+        db,
+        test_id,
+        f"Товар из каталога {test_id}",
+    )
+
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            ["ABC-002", "Первоначальное название поставщика", 500, "RUB", "шт."],
+        ],
+    )
+
+    first_result = run_import(db, supplier, file_path)
+
+    first_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=first_result["import_id"])
+        .one()
+    )
+
+    assert first_row.status == "Требует сопоставления"
+
+    match_import_row(
+        db,
+        import_id=first_result["import_id"],
+        row_id=first_row.id,
+        product_id=product.id,
+    )
+
+    first_offer = (
+        db.query(SupplierOfferDB)
+        .filter_by(import_id=first_result["import_id"])
+        .one()
+    )
+
+    assert first_offer.price == 500
+
+    second_file = create_excel_file(
+        tmp_path,
+        [
+            ["abc-002", "Изменённое название поставщика", 650, "RUB", "шт."],
+        ],
+    )
+
+    second_result = run_import(db, supplier, second_file)
+
+    second_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=second_result["import_id"])
+        .one()
+    )
+
+    assert second_row.status == "Сопоставлен"
+    assert second_row.product_id == product.id
+
+    offers = (
+        db.query(SupplierOfferDB)
+        .filter_by(supplier_id=supplier.id)
+        .order_by(SupplierOfferDB.id)
+        .all()
+    )
+
+    assert len(offers) == 2
+    assert offers[0].price == 500
+    assert offers[1].price == 650
+    assert offers[0].import_id != offers[1].import_id
+
+
+def test_manual_match_without_article_does_not_create_mapping(
+    db,
+    test_id,
+    tmp_path,
+):
+    supplier = create_supplier(db, test_id)
+    product = create_product(
+        db,
+        test_id,
+        f"Товар без артикула поставщика {test_id}",
+    )
+
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            [None, "Товар без артикула", 700, "RUB", "шт."],
+        ],
+    )
+
+    result = run_import(db, supplier, file_path)
+
+    import_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=result["import_id"])
+        .one()
+    )
+
+    assert import_row.status == "Требует сопоставления"
+
+    match_import_row(
+        db,
+        import_id=result["import_id"],
+        row_id=import_row.id,
+        product_id=product.id,
+    )
+
+    db.refresh(import_row)
+
+    assert import_row.status == "Сопоставлен"
+    assert import_row.product_id == product.id
+
+    assert db.query(SupplierProductMappingDB).filter_by(
+        supplier_id=supplier.id,
+    ).count() == 0
+
+    assert db.query(SupplierOfferDB).filter_by(
+        import_id=result["import_id"],
+        product_id=product.id,
+    ).count() == 1
+
+
+def test_supplier_product_mapping_is_isolated_between_suppliers(
+    db,
+    test_id,
+    tmp_path,
+):
+    supplier_one = create_supplier(db, f"{test_id}-one")
+    supplier_two = create_supplier(db, f"{test_id}-two")
+
+    product_one = create_product(
+        db,
+        test_id,
+        f"Товар первого поставщика {test_id}",
+    )
+
+    first_dir = tmp_path / "first"
+    first_dir.mkdir()
+
+    first_file = create_excel_file(
+        first_dir,
+        [
+            ["ABC-100", "Товар первого поставщика", 500, "RUB", "шт."],
+        ],
+    )
+
+    first_result = run_import(db, supplier_one, first_file)
+
+    first_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=first_result["import_id"])
+        .one()
+    )
+
+    assert first_row.status == "Требует сопоставления"
+
+    match_import_row(
+        db,
+        import_id=first_result["import_id"],
+        row_id=first_row.id,
+        product_id=product_one.id,
+    )
+
+    second_dir = tmp_path / "second"
+    second_dir.mkdir()
+
+    second_file = create_excel_file(
+        second_dir,
+        [
+            ["ABC-100", "Совершенно другой товар", 900, "RUB", "шт."],
+        ],
+    )
+
+    second_result = run_import(db, supplier_two, second_file)
+
+    second_row = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=second_result["import_id"])
+        .one()
+    )
+
+    assert second_row.status == "Требует сопоставления"
+    assert second_row.product_id is None
+
+    mapping_one = (
+        db.query(SupplierProductMappingDB)
+        .filter_by(
+            supplier_id=supplier_one.id,
+            normalized_supplier_article_number="abc-100",
+        )
+        .one()
+    )
+
+    assert mapping_one.product_id == product_one.id
+
+    assert db.query(SupplierProductMappingDB).filter_by(
+        supplier_id=supplier_two.id,
+        normalized_supplier_article_number="abc-100",
+    ).count() == 0
+
+    assert db.query(SupplierOfferDB).filter_by(
+        import_id=second_result["import_id"],
     ).count() == 0

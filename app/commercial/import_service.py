@@ -12,6 +12,7 @@ from app.commercial.models import (
     PriceListImportRowDB,
     SupplierDB,
     SupplierOfferDB,
+    SupplierProductMappingDB,
 )
 
 
@@ -241,11 +242,30 @@ def import_price_list(
             source_row = item["source_row"]
             raw_values = raw_rows.get(source_row, [])
 
-            product = _find_existing_product(
-                products,
-                item.get("article_number"),
-                item.get("name"),
+            normalized_article = _normalize(
+                item.get("source_article_number")
+                or item.get("article_number")
             )
+
+            mapping = None
+            if normalized_article:
+                mapping = (
+                    db.query(SupplierProductMappingDB)
+                    .filter_by(
+                        supplier_id=supplier_id,
+                        normalized_supplier_article_number=normalized_article,
+                    )
+                    .first()
+                )
+
+            if mapping is not None:
+                product = db.get(ProductDB, mapping.product_id)
+            else:
+                product = _find_existing_product(
+                    products,
+                    item.get("article_number"),
+                    item.get("name"),
+                )
 
             row_status = (
                 "Сопоставлен"
@@ -414,6 +434,43 @@ def match_import_row(
 
         if import_row.price is None:
             raise ValueError("Нельзя создать предложение: в строке отсутствует цена.")
+
+        normalized_article = _normalize(
+            import_row.source_article_number
+        )
+
+        if normalized_article:
+            mapping = (
+                db.query(SupplierProductMappingDB)
+                .filter_by(
+                    supplier_id=import_record.supplier_id,
+                    normalized_supplier_article_number=normalized_article,
+                )
+                .with_for_update()
+                .first()
+            )
+
+            if mapping is not None:
+                if mapping.product_id != product.id:
+                    raise ValueError(
+                        "Артикул этого поставщика уже связан с другим "
+                        "товаром каталога. Изменение связи требует "
+                        "отдельного подтверждения."
+                    )
+            else:
+                now = datetime.now()
+                mapping = SupplierProductMappingDB(
+                    supplier_id=import_record.supplier_id,
+                    supplier_article_number=str(
+                        import_row.source_article_number
+                    ),
+                    normalized_supplier_article_number=normalized_article,
+                    product_id=product.id,
+                    supplier_product_name=import_row.source_name,
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(mapping)
 
         offer = SupplierOfferDB(
             supplier_id=import_record.supplier_id,

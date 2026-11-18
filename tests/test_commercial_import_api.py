@@ -481,3 +481,105 @@ def test_search_products_api_prioritizes_exact_matches(client, db):
     assert len(results) >= 2
     assert results[0]["id"] == exact_product.id
     assert results[1]["id"] == partial_product.id
+
+def test_manual_match_api_rejects_invalid_product_id_type(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    _, import_id, import_row = create_unmatched_import(
+        client,
+        db,
+        tmp_path,
+        monkeypatch,
+    )
+
+    response = client.post(
+        f"/commercial/imports/{import_id}/rows/{import_row.id}/match",
+        json={"product_id": "123"},
+    )
+
+    assert response.status_code == 422
+
+    db.refresh(import_row)
+    assert import_row.status == "Требует сопоставления"
+    assert import_row.product_id is None
+
+
+def test_manual_match_api_rejects_missing_price(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    supplier, import_id, import_row = create_unmatched_import(
+        client,
+        db,
+        tmp_path,
+        monkeypatch,
+    )
+
+    import_row.price = None
+    db.commit()
+
+    product = ProductDB(
+        name=f"Товар без цены {uuid.uuid4().hex}",
+        article_number=f"NO-PRICE-{uuid.uuid4().hex}",
+        created_at=datetime.now(),
+    )
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+
+    response = client.post(
+        f"/commercial/imports/{import_id}/rows/{import_row.id}/match",
+        json={"product_id": product.id},
+    )
+
+    assert response.status_code == 400
+    assert "отсутствует цена" in response.json()["detail"]
+
+    db.refresh(import_row)
+    assert import_row.status == "Требует сопоставления"
+    assert import_row.product_id is None
+
+    offers_count = db.query(SupplierOfferDB).filter_by(
+        supplier_id=supplier.id,
+        product_id=product.id,
+    ).count()
+    assert offers_count == 0
+
+
+def test_manual_match_api_rejects_row_from_another_import(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    _, first_import_id, _ = create_unmatched_import(
+        client,
+        db,
+        tmp_path,
+        monkeypatch,
+    )
+    _, second_import_id, second_row = create_unmatched_import(
+        client,
+        db,
+        tmp_path,
+        monkeypatch,
+    )
+
+    assert first_import_id != second_import_id
+
+    response = client.post(
+        f"/commercial/imports/{first_import_id}/rows/{second_row.id}/match",
+        json={"product_id": 1},
+    )
+
+    assert response.status_code == 404
+    assert "Строка не найдена" in response.json()["detail"]
+
+    db.refresh(second_row)
+    assert second_row.status == "Требует сопоставления"
+    assert second_row.product_id is None
