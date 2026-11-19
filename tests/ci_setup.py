@@ -6,6 +6,8 @@
 Не предназначены для юридического анализа.
 """
 
+from sqlalchemy import inspect, text
+
 from app.database import (
     Base,
     engine,
@@ -23,6 +25,7 @@ from app.commercial.models import (
     ProductDB,
     SupplierOfferDB,
     SupplierProductMappingDB,
+    ProductUnitConversionDB,
 )
 
 VERSION_ID = "44-FZ-2026-10-01"
@@ -64,6 +67,21 @@ TEST_ARTICLES = [
 
 def main():
     Base.metadata.create_all(bind=engine)
+
+    if engine.dialect.name != "sqlite":
+        raise RuntimeError("CI setup ожидает SQLite-базу.")
+
+    with engine.begin() as connection:
+        columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("supplier_offers")
+        }
+
+        if "unit" not in columns:
+            connection.execute(
+                text("ALTER TABLE supplier_offers ADD COLUMN unit VARCHAR")
+            )
+            print("Добавлена колонка supplier_offers.unit")
 
     db = SessionLocal()
 

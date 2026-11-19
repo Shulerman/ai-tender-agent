@@ -8,6 +8,9 @@ from sqlalchemy import (
     Numeric,
     JSON,
     UniqueConstraint,
+    Index,
+    CheckConstraint,
+    text,
 )
 
 from app.database import Base
@@ -108,6 +111,61 @@ class ProductDB(Base):
     unit = Column(String, nullable=True)
     category = Column(String, nullable=True)
     created_at = Column(DateTime, nullable=True)
+
+
+class ProductUnitConversionDB(Base):
+    """Коэффициент пересчёта единиц для товара."""
+
+    __tablename__ = "product_unit_conversions"
+
+    __table_args__ = (
+        CheckConstraint(
+            "conversion_factor > 0",
+            name="ck_product_unit_conversion_factor_positive",
+        ),
+        Index(
+            "uq_product_unit_conversion_global",
+            "product_id",
+            "source_unit",
+            "target_unit",
+            unique=True,
+            sqlite_where=text("supplier_id IS NULL"),
+            postgresql_where=text("supplier_id IS NULL"),
+        ),
+        Index(
+            "uq_product_unit_conversion_supplier",
+            "product_id",
+            "supplier_id",
+            "source_unit",
+            "target_unit",
+            unique=True,
+            sqlite_where=text("supplier_id IS NOT NULL"),
+            postgresql_where=text("supplier_id IS NOT NULL"),
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    product_id = Column(
+        Integer,
+        ForeignKey("products.id"),
+        nullable=False,
+        index=True,
+    )
+
+    supplier_id = Column(
+        Integer,
+        ForeignKey("suppliers.id"),
+        nullable=True,
+        index=True,
+    )
+
+    source_unit = Column(String, nullable=False)
+    target_unit = Column(String, nullable=False)
+    conversion_factor = Column(Numeric(18, 9), nullable=False)
+
+    created_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
 
 
 class SupplierProductMappingDB(Base):
@@ -230,6 +288,7 @@ class SupplierOfferDB(Base):
 
     price = Column(Numeric(14, 2), nullable=False)
     currency = Column(String(3), default="RUB", nullable=False)
+    unit = Column(String, nullable=True)
 
     available_quantity = Column(Numeric(14, 3), nullable=True)
     availability_status = Column(String, nullable=True)

@@ -129,6 +129,7 @@ def test_import_matches_product_by_article(
     assert row.product_id == product.id
     assert row.status == "Сопоставлен"
     assert offer.product_id == product.id
+    assert offer.unit == "упаковка"
     assert offer.verification_status == "Не проверено"
     assert offer.source_reference is not None
     assert result["matched_offers"] == 1
@@ -396,6 +397,7 @@ def test_manual_match_creates_supplier_offer(
     assert len(offers) == 1
     assert offers[0].price == Decimal("725.50")
     assert offers[0].currency == "RUB"
+    assert offers[0].unit == "шт."
     assert offers[0].verification_status == "Не проверено"
 
 

@@ -12,6 +12,7 @@ from app.commercial.models import (
     PriceListImportDB,
     CommercialAnalysisDB,
     CommercialMatchDB,
+    ProductUnitConversionDB,
 )
 
 
@@ -224,6 +225,141 @@ def upsert_product(db: Session, product_data: dict):
     return _save_record(db, product, data), "created"
 
 
+def upsert_product_unit_conversion(
+    db: Session,
+    conversion_data: dict,
+):
+    """Создаёт или обновляет коэффициент пересчёта единиц товара."""
+
+    allowed_fields = {
+        "product_id",
+        "supplier_id",
+        "source_unit",
+        "target_unit",
+        "conversion_factor",
+    }
+
+    _validate_fields(
+        conversion_data,
+        allowed_fields,
+        {
+            "product_id",
+            "source_unit",
+            "target_unit",
+            "conversion_factor",
+        },
+    )
+
+    product = db.get(ProductDB, conversion_data["product_id"])
+
+    if product is None:
+        raise ValueError("Товар не найден")
+
+    supplier_id = conversion_data.get("supplier_id")
+
+    if supplier_id is not None and db.get(SupplierDB, supplier_id) is None:
+        raise ValueError("Поставщик не найден")
+
+    source_unit = conversion_data["source_unit"].strip()
+    target_unit = conversion_data["target_unit"].strip()
+
+    if not source_unit or not target_unit:
+        raise ValueError("Единицы измерения не могут быть пустыми")
+
+    if not product.unit or target_unit != product.unit.strip():
+        raise ValueError(
+            "Целевая единица должна совпадать с единицей товара в каталоге"
+        )
+
+    _validate_non_negative(
+        conversion_data["conversion_factor"],
+        "conversion_factor",
+    )
+
+    factor = Decimal(str(conversion_data["conversion_factor"]))
+
+    if factor <= 0:
+        raise ValueError("Коэффициент пересчёта должен быть больше нуля")
+
+    now = datetime.now()
+
+    query = db.query(ProductUnitConversionDB).filter(
+        ProductUnitConversionDB.product_id == product.id,
+        ProductUnitConversionDB.source_unit == source_unit,
+        ProductUnitConversionDB.target_unit == target_unit,
+    )
+
+    if supplier_id is None:
+        query = query.filter(
+            ProductUnitConversionDB.supplier_id.is_(None)
+        )
+    else:
+        query = query.filter(
+            ProductUnitConversionDB.supplier_id == supplier_id
+        )
+
+    existing = query.first()
+
+    data = {
+        "product_id": product.id,
+        "supplier_id": supplier_id,
+        "source_unit": source_unit,
+        "target_unit": target_unit,
+        "conversion_factor": factor,
+        "updated_at": now,
+    }
+
+    if existing is not None:
+        return _save_record(db, existing, data), "updated"
+
+    data["created_at"] = now
+
+    conversion = ProductUnitConversionDB()
+
+    return _save_record(db, conversion, data), "created"
+
+
+def get_product_unit_conversion(
+    db: Session,
+    product_id: int,
+    source_unit: str,
+    target_unit: str,
+    supplier_id: int = None,
+):
+    """Ищет коэффициент: сначала поставщика, затем общий."""
+
+    product = db.get(ProductDB, product_id)
+
+    if product is None:
+        raise ValueError("Товар не найден")
+
+    if not product.unit or target_unit.strip() != product.unit.strip():
+        raise ValueError(
+            "Целевая единица должна совпадать с единицей товара в каталоге"
+        )
+
+    query = db.query(ProductUnitConversionDB).filter(
+        ProductUnitConversionDB.product_id == product_id,
+        ProductUnitConversionDB.source_unit == source_unit.strip(),
+        ProductUnitConversionDB.target_unit == target_unit.strip(),
+    )
+
+    if supplier_id is not None:
+        if db.get(SupplierDB, supplier_id) is None:
+            raise ValueError("Поставщик не найден")
+
+        supplier_conversion = query.filter(
+            ProductUnitConversionDB.supplier_id == supplier_id
+        ).first()
+
+        if supplier_conversion is not None:
+            return supplier_conversion
+
+    return query.filter(
+        ProductUnitConversionDB.supplier_id.is_(None)
+    ).first()
+
+
 def create_price_list_import(db: Session, import_data: dict):
     """Создаёт запись об импорте прайс-листа поставщика."""
 
@@ -323,6 +459,7 @@ def create_supplier_offer(db: Session, offer_data: dict):
         "product_id",
         "price",
         "currency",
+        "unit",
         "available_quantity",
         "availability_status",
         "delivery_time_days",

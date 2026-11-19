@@ -6,7 +6,11 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.database import SessionLocal, TenderDB
-from app.commercial.models import PriceListImportRowDB
+from app.commercial.models import (
+    PriceListImportRowDB,
+    ProductUnitConversionDB,
+)
+from app.commercial.unit_normalizer import normalize_unit_price
 from app.commercial.service import (
     upsert_manufacturer,
     upsert_supplier,
@@ -17,6 +21,8 @@ from app.commercial.service import (
     create_commercial_analysis,
     create_commercial_match,
     get_commercial_matches,
+    upsert_product_unit_conversion,
+    get_product_unit_conversion,
 )
 
 
@@ -122,6 +128,348 @@ def test_create_product(db, test_id):
 
     assert status == "created"
     assert product.id is not None
+
+
+def test_create_product_unit_conversion(db, test_id):
+    """Создаёт общий коэффициент пересчёта единиц товара."""
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Бумага-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    conversion, status = upsert_product_unit_conversion(
+        db,
+        {
+            "product_id": product.id,
+            "source_unit": "упаковка",
+            "target_unit": "шт.",
+            "conversion_factor": Decimal("500"),
+        },
+    )
+
+    assert status == "created"
+    assert conversion.id is not None
+    assert conversion.supplier_id is None
+    assert conversion.conversion_factor == Decimal("500")
+
+
+def test_update_product_unit_conversion(db, test_id):
+    """Повторное сохранение обновляет коэффициент, а не создаёт дубль."""
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Бумага для обновления-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    conversion_data = {
+        "product_id": product.id,
+        "source_unit": "упаковка",
+        "target_unit": "шт.",
+        "conversion_factor": Decimal("500"),
+    }
+
+    first, first_status = upsert_product_unit_conversion(
+        db,
+        conversion_data,
+    )
+
+    updated, update_status = upsert_product_unit_conversion(
+        db,
+        {
+            **conversion_data,
+            "conversion_factor": Decimal("400"),
+        },
+    )
+
+    assert first_status == "created"
+    assert update_status == "updated"
+    assert updated.id == first.id
+    assert updated.conversion_factor == Decimal("400")
+
+    count = db.query(ProductUnitConversionDB).filter(
+        ProductUnitConversionDB.product_id == product.id,
+    ).count()
+
+    assert count == 1
+
+
+def test_supplier_conversion_has_priority_over_global(db, test_id):
+    """Коэффициент поставщика имеет приоритет над общим коэффициентом."""
+
+    supplier, _ = upsert_supplier(
+        db,
+        {"name": f"Поставщик бумаги-{test_id}"},
+    )
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Бумага с разными упаковками-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    upsert_product_unit_conversion(
+        db,
+        {
+            "product_id": product.id,
+            "source_unit": "упаковка",
+            "target_unit": "шт.",
+            "conversion_factor": Decimal("500"),
+        },
+    )
+
+    upsert_product_unit_conversion(
+        db,
+        {
+            "product_id": product.id,
+            "supplier_id": supplier.id,
+            "source_unit": "упаковка",
+            "target_unit": "шт.",
+            "conversion_factor": Decimal("250"),
+        },
+    )
+
+    supplier_conversion = get_product_unit_conversion(
+        db,
+        product.id,
+        "упаковка",
+        "шт.",
+        supplier.id,
+    )
+
+    global_conversion = get_product_unit_conversion(
+        db,
+        product.id,
+        "упаковка",
+        "шт.",
+    )
+
+    assert supplier_conversion.conversion_factor == Decimal("250")
+    assert global_conversion.conversion_factor == Decimal("500")
+
+
+def test_supplier_conversion_falls_back_to_global(db, test_id):
+    """Если правила поставщика нет, используется общее правило."""
+
+    supplier, _ = upsert_supplier(
+        db,
+        {"name": f"Поставщик без своего правила-{test_id}"},
+    )
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Бумага с общим правилом-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    upsert_product_unit_conversion(
+        db,
+        {
+            "product_id": product.id,
+            "source_unit": "упаковка",
+            "target_unit": "шт.",
+            "conversion_factor": Decimal("500"),
+        },
+    )
+
+    conversion = get_product_unit_conversion(
+        db,
+        product.id,
+        "упаковка",
+        "шт.",
+        supplier.id,
+    )
+
+    assert conversion is not None
+    assert conversion.supplier_id is None
+    assert conversion.conversion_factor == Decimal("500")
+
+
+def test_product_unit_conversion_rejects_non_positive_factor(db, test_id):
+    """Нулевой и отрицательный коэффициенты запрещены."""
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Бумага с неверным коэффициентом-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    for factor in (Decimal("0"), Decimal("-1")):
+        with pytest.raises(ValueError):
+            upsert_product_unit_conversion(
+                db,
+                {
+                    "product_id": product.id,
+                    "source_unit": "упаковка",
+                    "target_unit": "шт.",
+                    "conversion_factor": factor,
+                },
+            )
+
+
+def test_product_unit_conversion_rejects_wrong_target_unit(db, test_id):
+    """Целевая единица должна совпадать с единицей товара в каталоге."""
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Бумага с неверной целевой единицей-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    with pytest.raises(ValueError, match="Целевая единица"):
+        upsert_product_unit_conversion(
+            db,
+            {
+                "product_id": product.id,
+                "source_unit": "упаковка",
+                "target_unit": "кг",
+                "conversion_factor": Decimal("500"),
+            },
+        )
+
+
+def test_product_unit_conversion_rejects_missing_product(db):
+    """Нельзя создать коэффициент для несуществующего товара."""
+
+    with pytest.raises(ValueError, match="Товар не найден"):
+        upsert_product_unit_conversion(
+            db,
+            {
+                "product_id": 999999999,
+                "source_unit": "упаковка",
+                "target_unit": "шт.",
+                "conversion_factor": Decimal("500"),
+            },
+        )
+
+
+def test_product_unit_conversion_rejects_missing_supplier(db, test_id):
+    """Нельзя создать индивидуальный коэффициент для неизвестного поставщика."""
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар без поставщика-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    with pytest.raises(ValueError, match="Поставщик не найден"):
+        upsert_product_unit_conversion(
+            db,
+            {
+                "product_id": product.id,
+                "supplier_id": 999999999,
+                "source_unit": "упаковка",
+                "target_unit": "шт.",
+                "conversion_factor": Decimal("500"),
+            },
+        )
+
+
+def test_product_unit_conversion_rejects_stale_target_unit(db, test_id):
+    """Старый коэффициент нельзя получить после изменения единицы товара."""
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар с изменённой единицей-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    upsert_product_unit_conversion(
+        db,
+        {
+            "product_id": product.id,
+            "source_unit": "упаковка",
+            "target_unit": "шт.",
+            "conversion_factor": Decimal("500"),
+        },
+    )
+
+    upsert_product(
+        db,
+        {
+            "name": product.name,
+            "unit": "кг",
+        },
+    )
+
+    with pytest.raises(ValueError, match="Целевая единица"):
+        get_product_unit_conversion(
+            db,
+            product.id,
+            "упаковка",
+            "шт.",
+        )
+
+
+@pytest.mark.parametrize(
+    "price, source_unit, target_unit, expected",
+    [
+        ("10", "г", "кг", "10000"),
+        ("2", "мл", "л", "2000"),
+        ("5", "см", "м", "500"),
+        ("3", "см²", "м²", "30000"),
+        ("12", "штук", "шт.", "12"),
+        ("100", "кг", "г", "0.1"),
+    ],
+)
+def test_normalize_standard_unit_price(
+    price,
+    source_unit,
+    target_unit,
+    expected,
+):
+    result = normalize_unit_price(
+        price,
+        source_unit,
+        target_unit,
+    )
+
+    assert result == Decimal(expected)
+
+
+def test_normalize_unit_price_rejects_different_families():
+    with pytest.raises(ValueError, match="разных физических категорий"):
+        normalize_unit_price(
+            "100",
+            "кг",
+            "л",
+        )
+
+
+def test_normalize_unit_price_rejects_negative_price():
+    with pytest.raises(ValueError, match="неотрицательным"):
+        normalize_unit_price(
+            "-10",
+            "кг",
+            "кг",
+        )
+
+
+def test_normalize_unknown_unit_requires_conversion_rule():
+    with pytest.raises(ValueError, match="требуется товар и база данных"):
+        normalize_unit_price(
+            "500",
+            "упаковка",
+            "шт.",
+        )
 
 
 def test_create_price_list_import_row_without_product(db, test_id):
@@ -481,3 +829,90 @@ def test_get_commercial_matches(db):
     assert len(matches) == 1
     assert matches[0].tender_requirement == "Требование номер один"
     assert matches[0].analysis_id == analysis.id
+
+@pytest.mark.parametrize(
+    "global_factor, supplier_factor, expected_price",
+    [
+        (Decimal("500"), None, Decimal("2")),
+        (Decimal("500"), Decimal("250"), Decimal("4")),
+        (Decimal("500"), Decimal("1000"), Decimal("1")),
+    ],
+)
+def test_normalize_packaging_price_with_database_conversion(
+    db,
+    test_id,
+    global_factor,
+    supplier_factor,
+    expected_price,
+):
+    """Цена упаковки пересчитывается по правилу поставщика или общему правилу."""
+
+    supplier, _ = upsert_supplier(
+        db,
+        {"name": f"Поставщик нормализации-{test_id}"},
+    )
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар нормализации-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    upsert_product_unit_conversion(
+        db,
+        {
+            "product_id": product.id,
+            "source_unit": "упаковка",
+            "target_unit": "шт.",
+            "conversion_factor": global_factor,
+        },
+    )
+
+    if supplier_factor is not None:
+        upsert_product_unit_conversion(
+            db,
+            {
+                "product_id": product.id,
+                "supplier_id": supplier.id,
+                "source_unit": "упаковка",
+                "target_unit": "шт.",
+                "conversion_factor": supplier_factor,
+            },
+        )
+
+    result = normalize_unit_price(
+        price="1000",
+        source_unit="упаковка",
+        target_unit="шт.",
+        db=db,
+        product_id=product.id,
+        supplier_id=supplier.id,
+    )
+
+    assert result == expected_price
+
+
+def test_normalize_unknown_unit_rejects_missing_database_conversion(
+    db,
+    test_id,
+):
+    """Без сохранённого коэффициента упаковка не пересчитывается."""
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар без коэффициента-{test_id}",
+            "unit": "шт.",
+        },
+    )
+
+    with pytest.raises(ValueError, match="Не найден коэффициент пересчёта"):
+        normalize_unit_price(
+            price="1000",
+            source_unit="упаковка",
+            target_unit="шт.",
+            db=db,
+            product_id=product.id,
+        )
