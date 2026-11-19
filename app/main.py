@@ -1,3 +1,4 @@
+from datetime import datetime
 import hashlib
 import json
 import tempfile
@@ -33,11 +34,19 @@ from app.commercial.models import (
     ManufacturerDB,
     PriceListImportDB,
     PriceListImportRowDB,
+    SupplierOfferDB,
+    SupplierOfferVerificationDB,
 )
 from app.commercial.excel_importer import inspect_price_list
 from app.commercial.import_service import (
+    _normalize,
     import_price_list,
     match_import_row,
+)
+from app.commercial.service import (
+    get_all_supplier_offers,
+    get_current_supplier_offers,
+    verify_supplier_offer,
 )
 
 
@@ -392,6 +401,138 @@ def search_commercial_products(
     }
 
 
+@app.get("/commercial/products/duplicates")
+def get_commercial_product_duplicates(
+    db: Session = Depends(get_db),
+):
+    """Находит точные совпадения товаров каталога для ручной проверки."""
+
+    rows = (
+        db.query(ProductDB, ManufacturerDB)
+        .outerjoin(
+            ManufacturerDB,
+            ProductDB.manufacturer_id == ManufacturerDB.id,
+        )
+        .order_by(ProductDB.id.asc())
+        .all()
+    )
+
+    records = []
+    articles = {}
+    names = {}
+
+    for product, manufacturer in rows:
+        record = {
+            "id": product.id,
+            "name": product.name,
+            "article_number": product.article_number,
+            "manufacturer_id": product.manufacturer_id,
+            "manufacturer": manufacturer.name if manufacturer else None,
+            "unit": product.unit,
+            "category": product.category,
+        }
+        records.append((product, record))
+
+        article = _normalize(product.article_number)
+        if article:
+            articles.setdefault(article, []).append(record)
+
+        name = _normalize(product.name)
+        if name:
+            names.setdefault(
+                (product.manufacturer_id, name),
+                [],
+            ).append(record)
+
+    groups = []
+
+    def add_group(group_type, match_value, manufacturer_id, products, requires_review):
+        if len(products) < 2:
+            return
+
+        manufacturer_names = {
+            item["manufacturer"]
+            for item in products
+            if item["manufacturer"] is not None
+        }
+
+        groups.append({
+            "type": group_type,
+            "match_value": match_value,
+            "manufacturer_id": manufacturer_id,
+            "manufacturer": (
+                next(iter(manufacturer_names))
+                if len(manufacturer_names) == 1
+                else None
+            ),
+            "requires_review": requires_review,
+            "products": products,
+        })
+
+    for article, article_records in articles.items():
+        manufacturer_ids = {
+            item["manufacturer_id"]
+            for item in article_records
+            if item["manufacturer_id"] is not None
+        }
+
+        if len(manufacturer_ids) > 1:
+            add_group(
+                "article_across_manufacturers",
+                article,
+                None,
+                article_records,
+                True,
+            )
+
+        by_manufacturer = {}
+        for item in article_records:
+            by_manufacturer.setdefault(
+                item["manufacturer_id"],
+                [],
+            ).append(item)
+
+        for manufacturer_id, products in by_manufacturer.items():
+            if len(products) > 1:
+                add_group(
+                    (
+                        "article_without_manufacturer"
+                        if manufacturer_id is None
+                        else "duplicate_article"
+                    ),
+                    article,
+                    manufacturer_id,
+                    products,
+                    manufacturer_id is None,
+                )
+
+    for (manufacturer_id, name), products in names.items():
+        if len(products) > 1:
+            add_group(
+                (
+                    "name_without_manufacturer"
+                    if manufacturer_id is None
+                    else "duplicate_name"
+                ),
+                name,
+                manufacturer_id,
+                products,
+                manufacturer_id is None,
+            )
+
+    groups.sort(
+        key=lambda group: (
+            group["type"],
+            group["match_value"],
+            group["manufacturer_id"] or 0,
+        )
+    )
+
+    return {
+        "count": len(groups),
+        "groups": groups,
+    }
+
 @app.get("/commercial/imports/{import_id}/unmatched")
 def get_unmatched_import_rows(
     import_id: int,
@@ -705,3 +846,153 @@ async def analyze_full(payload: dict):
             status_code=500,
             detail="Ошибка полного анализа закупки",
         )
+
+
+@app.get("/commercial/offers")
+def list_commercial_offers(
+    supplier_id: int | None = None,
+    product_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Возвращает все предложения с названиями и статусом актуальности."""
+
+    offers = get_all_supplier_offers(
+        db,
+        supplier_id=supplier_id,
+        product_id=product_id,
+    )
+
+    supplier_ids = {offer.supplier_id for offer in offers}
+    product_ids = {offer.product_id for offer in offers}
+
+    suppliers = {
+        item.id: item.name
+        for item in db.query(SupplierDB).filter(
+            SupplierDB.id.in_(supplier_ids)
+        ).all()
+    } if supplier_ids else {}
+
+    products = {
+        item.id: item.name
+        for item in db.query(ProductDB).filter(
+            ProductDB.id.in_(product_ids)
+        ).all()
+    } if product_ids else {}
+
+    return [
+        {
+            column.name: getattr(offer, column.name)
+            for column in SupplierOfferDB.__table__.columns
+        } | {
+            "supplier_name": suppliers.get(offer.supplier_id),
+            "product_name": products.get(offer.product_id),
+            "freshness_status": (
+                "Требуется перепроверка"
+                if offer.valid_until is not None
+                and offer.valid_until < datetime.now()
+                else "Срок не указан"
+                if offer.valid_until is None
+                else "Не просрочено"
+            ),
+            "freshness_warning": (
+                "Требуется уточнить у поставщика актуальность цены и наличия"
+                if offer.valid_until is not None
+                and offer.valid_until < datetime.now()
+                else None
+            ),
+        }
+        for offer in offers
+    ]
+
+
+@app.post("/commercial/offers/{offer_id}/verification")
+def create_commercial_offer_verification(
+    offer_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Подтверждает или отклоняет предложение с сохранением истории."""
+
+    allowed_fields = {"verification_status", "verified_by", "notes"}
+    unknown_fields = set(payload) - allowed_fields
+
+    if unknown_fields:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Неизвестные поля: {', '.join(sorted(unknown_fields))}",
+        )
+
+    verification_status = payload.get("verification_status")
+
+    if not isinstance(verification_status, str) or verification_status not in {"Подтверждено", "Отклонено"}:
+        raise HTTPException(
+            status_code=422,
+            detail="verification_status должен быть 'Подтверждено' или 'Отклонено'",
+        )
+
+    for field in ("verified_by", "notes"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, str):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{field} должен быть строкой",
+            )
+
+    try:
+        verification = verify_supplier_offer(
+            db=db,
+            offer_id=offer_id,
+            verification_status=verification_status,
+            verified_by=payload.get("verified_by"),
+            notes=payload.get("notes"),
+        )
+    except ValueError as exc:
+        if str(exc) == "Предложение поставщика не найдено":
+            raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    return {
+        "id": verification.id,
+        "offer_id": verification.offer_id,
+        "verification_status": verification.verification_status,
+        "verified_at": verification.verified_at,
+        "verified_by": verification.verified_by,
+        "notes": verification.notes,
+    }
+
+
+@app.get("/commercial/offers/{offer_id}/verifications")
+def get_commercial_offer_verifications(
+    offer_id: int,
+    db: Session = Depends(get_db),
+):
+    """Возвращает историю проверок коммерческого предложения."""
+
+    offer = db.get(SupplierOfferDB, offer_id)
+    if offer is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Предложение поставщика не найдено",
+        )
+
+    verifications = (
+        db.query(SupplierOfferVerificationDB)
+        .filter(SupplierOfferVerificationDB.offer_id == offer_id)
+        .order_by(
+            SupplierOfferVerificationDB.verified_at.desc(),
+            SupplierOfferVerificationDB.id.desc(),
+        )
+        .all()
+    )
+
+    return [
+        {
+            "id": item.id,
+            "offer_id": item.offer_id,
+            "verification_status": item.verification_status,
+            "verified_at": item.verified_at,
+            "verified_by": item.verified_by,
+            "notes": item.notes,
+        }
+        for item in verifications
+    ]

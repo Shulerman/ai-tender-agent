@@ -24,6 +24,7 @@ from app.commercial.models import (
     PriceListImportRowDB,
     ProductDB,
     SupplierOfferDB,
+    SupplierOfferVerificationDB,
     SupplierProductMappingDB,
     ProductUnitConversionDB,
 )

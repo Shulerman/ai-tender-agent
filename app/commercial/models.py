@@ -312,6 +312,32 @@ class SupplierOfferDB(Base):
     notes = Column(Text, nullable=True)
 
 
+class SupplierOfferVerificationDB(Base):
+    """История проверок коммерческого предложения."""
+
+    __tablename__ = "supplier_offer_verifications"
+
+    __table_args__ = (
+        CheckConstraint(
+            "verification_status IN ('Подтверждено', 'Отклонено')",
+            name="ck_supplier_offer_verification_status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    offer_id = Column(
+        Integer,
+        ForeignKey("supplier_offers.id"),
+        nullable=False,
+        index=True,
+    )
+
+    verification_status = Column(String, nullable=False)
+    verified_at = Column(DateTime, nullable=False)
+    verified_by = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+
 class CommercialAnalysisDB(Base):
     """Сохранённый результат коммерческого анализа тендера."""
 

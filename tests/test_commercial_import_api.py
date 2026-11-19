@@ -14,6 +14,7 @@ from app.commercial.models import (
     ManufacturerDB,
     PriceListImportRowDB,
     SupplierOfferDB,
+    SupplierOfferVerificationDB,
 )
 from app import main as main_module
 
@@ -583,3 +584,301 @@ def test_manual_match_api_rejects_row_from_another_import(
     db.refresh(second_row)
     assert second_row.status == "Требует сопоставления"
     assert second_row.product_id is None
+
+
+def test_product_duplicates_api_groups_exact_matches(client, db):
+    token = uuid.uuid4().hex
+
+    manufacturer_a = ManufacturerDB(name=f"Производитель A {token}")
+    manufacturer_b = ManufacturerDB(name=f"Производитель B {token}")
+    db.add_all([manufacturer_a, manufacturer_b])
+    db.flush()
+
+    products = [
+        ProductDB(
+            name=f"Товар ё {token}",
+            article_number=f"AB-001-{token}",
+            manufacturer_id=manufacturer_a.id,
+        ),
+        ProductDB(
+            name=f" ТОВАР е {token} ",
+            article_number=f" ab-001-{token} ",
+            manufacturer_id=manufacturer_a.id,
+        ),
+        ProductDB(
+            name=f"Другой товар {token}",
+            article_number=f"AB-001-{token}",
+            manufacturer_id=manufacturer_b.id,
+        ),
+        ProductDB(
+            name=f"Товар без производителя 1 {token}",
+            article_number=f"NO-MFR-{token}",
+        ),
+        ProductDB(
+            name=f"Товар без производителя 2 {token}",
+            article_number=f" no-mfr-{token} ",
+        ),
+        ProductDB(name=f"Одинаковое название {token}"),
+        ProductDB(name=f" ОДИНАКОВОЕ НАЗВАНИЕ {token} "),
+    ]
+    db.add_all(products)
+    db.commit()
+
+    response = client.get("/commercial/products/duplicates")
+
+    assert response.status_code == 200
+    result = response.json()
+
+    test_groups = [
+        group
+        for group in result["groups"]
+        if token in group["match_value"]
+    ]
+
+    groups_by_type = {
+        group["type"]: group
+        for group in test_groups
+    }
+
+    assert len(test_groups) == 5
+    assert set(groups_by_type) == {
+        "duplicate_article",
+        "duplicate_name",
+        "article_across_manufacturers",
+        "article_without_manufacturer",
+        "name_without_manufacturer",
+    }
+
+    assert len(groups_by_type["duplicate_article"]["products"]) == 2
+    assert len(groups_by_type["duplicate_name"]["products"]) == 2
+    assert len(
+        groups_by_type["article_across_manufacturers"]["products"]
+    ) == 3
+
+    assert groups_by_type["article_across_manufacturers"][
+        "requires_review"
+    ] is True
+
+    assert len(
+        groups_by_type["article_without_manufacturer"]["products"]
+    ) == 2
+    assert groups_by_type["article_without_manufacturer"][
+        "requires_review"
+    ] is True
+
+    assert len(
+        groups_by_type["name_without_manufacturer"]["products"]
+    ) == 2
+    assert groups_by_type["name_without_manufacturer"][
+        "requires_review"
+    ] is True
+def create_api_offer(db, valid_until=None):
+    token = uuid.uuid4().hex
+    supplier = SupplierDB(name=f"API поставщик {token}")
+    product = ProductDB(name=f"API товар {token}", unit="шт.")
+    db.add_all([supplier, product])
+    db.flush()
+
+    offer = SupplierOfferDB(
+        supplier_id=supplier.id,
+        product_id=product.id,
+        price=150,
+        received_at=datetime.now(),
+        valid_until=valid_until,
+        source_type="manual",
+    )
+    db.add(offer)
+    db.commit()
+    db.refresh(offer)
+    return offer, supplier, product
+
+
+def test_commercial_offers_api_returns_current_offers(client, db):
+    offer, supplier, product = create_api_offer(db)
+
+    response = client.get("/commercial/offers")
+
+    assert response.status_code == 200
+    result = response.json()
+
+    item = next(row for row in result if row["id"] == offer.id)
+    assert item["supplier_id"] == supplier.id
+    assert item["product_id"] == product.id
+    assert item["supplier_name"] == supplier.name
+    assert item["product_name"] == product.name
+    assert item["verification_status"] == "Не проверено"
+    assert float(item["price"]) == 150.0
+
+
+
+def test_commercial_offers_api_filters_and_includes_expired(client, db):
+    from datetime import timedelta
+
+    offer_a, supplier_a, product_a = create_api_offer(db)
+    offer_b, supplier_b, product_b = create_api_offer(db)
+    expired_offer, _, _ = create_api_offer(
+        db,
+        valid_until=datetime.now() - timedelta(days=1),
+    )
+
+    response = client.get(
+        "/commercial/offers",
+        params={"supplier_id": supplier_a.id},
+    )
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == [offer_a.id]
+
+    response = client.get(
+        "/commercial/offers",
+        params={"product_id": product_b.id},
+    )
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()] == [offer_b.id]
+
+    response = client.get("/commercial/offers")
+    assert response.status_code == 200
+    returned_ids = {item["id"] for item in response.json()}
+    assert offer_a.id in returned_ids
+    assert offer_b.id in returned_ids
+    assert expired_offer.id in returned_ids
+
+    expired_item = next(
+        item for item in response.json()
+        if item["id"] == expired_offer.id
+    )
+    assert expired_item["freshness_status"] == "Требуется перепроверка"
+    assert expired_item["freshness_warning"] == (
+        "Требуется уточнить у поставщика актуальность цены и наличия"
+    )
+
+
+
+def test_commercial_offer_verification_api_confirms_offer(client, db):
+    offer, _, _ = create_api_offer(db)
+
+    response = client.post(
+        f"/commercial/offers/{offer.id}/verification",
+        json={
+            "verification_status": "Подтверждено",
+            "verified_by": "Тестовый пользователь",
+            "notes": "Цена подтверждена поставщиком",
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["verification_status"] == "Подтверждено"
+
+    db.refresh(offer)
+    assert offer.verification_status == "Подтверждено"
+
+    history = (
+        db.query(SupplierOfferVerificationDB)
+        .filter(SupplierOfferVerificationDB.offer_id == offer.id)
+        .all()
+    )
+    assert len(history) == 1
+    assert history[0].verification_status == "Подтверждено"
+    assert history[0].verified_by == "Тестовый пользователь"
+    assert history[0].notes == "Цена подтверждена поставщиком"
+
+
+
+def test_commercial_offer_verification_api_rejects_invalid_data(client, db):
+    offer, _, _ = create_api_offer(db)
+
+    invalid_payloads = [
+        {"verification_status": "Не проверено"},
+        {"verification_status": ["Подтверждено"]},
+        {
+            "verification_status": "Подтверждено",
+            "unexpected": "value",
+        },
+        {
+            "verification_status": "Подтверждено",
+            "verified_by": 123,
+        },
+        {
+            "verification_status": "Отклонено",
+            "notes": 123,
+        },
+    ]
+
+    for payload in invalid_payloads:
+        response = client.post(
+            f"/commercial/offers/{offer.id}/verification",
+            json=payload,
+        )
+        assert response.status_code == 422
+
+    db.refresh(offer)
+    assert offer.verification_status == "Не проверено"
+
+    history = (
+        db.query(SupplierOfferVerificationDB)
+        .filter(SupplierOfferVerificationDB.offer_id == offer.id)
+        .all()
+    )
+    assert history == []
+
+
+
+def test_commercial_offer_verification_api_returns_404_for_missing_offer(client):
+    response = client.post(
+        "/commercial/offers/999999/verification",
+        json={"verification_status": "Подтверждено"},
+    )
+
+    assert response.status_code == 404
+
+
+
+def test_commercial_offer_verification_history_api_returns_latest_first(client, db):
+    offer, _, _ = create_api_offer(db)
+
+    first = SupplierOfferVerificationDB(
+        offer_id=offer.id,
+        verification_status="Подтверждено",
+        verified_at=datetime(2026, 1, 1, 10, 0),
+        verified_by="Первый проверяющий",
+    )
+    second = SupplierOfferVerificationDB(
+        offer_id=offer.id,
+        verification_status="Отклонено",
+        verified_at=datetime(2026, 1, 2, 10, 0),
+        verified_by="Второй проверяющий",
+    )
+    db.add_all([first, second])
+    db.commit()
+
+    response = client.get(
+        f"/commercial/offers/{offer.id}/verifications"
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert len(result) == 2
+    assert result[0]["verification_status"] == "Отклонено"
+    assert result[0]["verified_by"] == "Второй проверяющий"
+    assert result[1]["verification_status"] == "Подтверждено"
+    assert result[1]["verified_by"] == "Первый проверяющий"
+
+
+
+def test_commercial_offer_verification_history_api_returns_empty_list(client, db):
+    offer, _, _ = create_api_offer(db)
+
+    response = client.get(
+        f"/commercial/offers/{offer.id}/verifications"
+    )
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_commercial_offer_verification_history_api_returns_404_for_missing_offer(client):
+    response = client.get(
+        "/commercial/offers/999999/verifications"
+    )
+
+    assert response.status_code == 404

@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from app.database import SessionLocal, TenderDB
 from app.commercial.models import (
     PriceListImportRowDB,
+    SupplierOfferVerificationDB,
     ProductUnitConversionDB,
 )
 from app.commercial.unit_normalizer import normalize_unit_price
@@ -17,6 +18,7 @@ from app.commercial.service import (
     upsert_product,
     create_price_list_import,
     create_supplier_offer,
+    verify_supplier_offer,
     get_current_supplier_offers,
     create_commercial_analysis,
     create_commercial_match,
@@ -634,7 +636,122 @@ def test_create_supplier_offer(db):
 
     assert offer.id is not None
     assert offer.price == Decimal("1500.00")
+    assert offer.verification_status == "Не проверено"
 
+
+def test_supplier_offer_verification_status_cannot_be_set_on_creation(db):
+    supplier, _ = upsert_supplier(
+        db,
+        {"name": "Поставщик с запрещённым статусом"},
+    )
+
+    product, _ = upsert_product(
+        db,
+        {"name": "Товар с запрещённым статусом"},
+    )
+
+    with pytest.raises(ValueError, match="verification_status"):
+        create_supplier_offer(
+            db,
+            {
+                "supplier_id": supplier.id,
+                "product_id": product.id,
+                "price": Decimal("1500.00"),
+                "received_at": datetime.now(),
+                "source_type": "manual",
+                "verification_status": "Подтверждено",
+            },
+        )
+
+
+
+def test_verify_supplier_offer_updates_status_and_creates_history(db):
+    supplier, _ = upsert_supplier(db, {"name": "Поставщик проверки"})
+    product, _ = upsert_product(db, {"name": "Товар проверки"})
+    offer = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier.id,
+            "product_id": product.id,
+            "price": Decimal("1500.00"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+
+    verification = verify_supplier_offer(
+        db,
+        offer.id,
+        "Подтверждено",
+        verified_by="Проверяющий",
+        notes="Цена подтверждена",
+    )
+
+    db.refresh(offer)
+    history = db.query(SupplierOfferVerificationDB).filter_by(
+        offer_id=offer.id
+    ).all()
+
+    assert offer.verification_status == "Подтверждено"
+    assert verification.verification_status == "Подтверждено"
+    assert verification.verified_by == "Проверяющий"
+    assert verification.notes == "Цена подтверждена"
+    assert len(history) == 1
+
+
+def test_verify_supplier_offer_repeated_decisions_preserve_history(db):
+    supplier, _ = upsert_supplier(db, {"name": "Поставщик повторной проверки"})
+    product, _ = upsert_product(db, {"name": "Товар повторной проверки"})
+    offer = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier.id,
+            "product_id": product.id,
+            "price": Decimal("1500.00"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+
+    verify_supplier_offer(db, offer.id, "Отклонено")
+    verify_supplier_offer(db, offer.id, "Подтверждено")
+
+    db.refresh(offer)
+    history = (
+        db.query(SupplierOfferVerificationDB)
+        .filter_by(offer_id=offer.id)
+        .order_by(SupplierOfferVerificationDB.id.asc())
+        .all()
+    )
+
+    assert offer.verification_status == "Подтверждено"
+    assert [item.verification_status for item in history] == [
+        "Отклонено",
+        "Подтверждено",
+    ]
+
+
+def test_verify_supplier_offer_rejects_unknown_offer(db):
+    with pytest.raises(ValueError, match="не найдено"):
+        verify_supplier_offer(db, 999999999, "Подтверждено")
+
+
+def test_verify_supplier_offer_rejects_invalid_status(db):
+    supplier, _ = upsert_supplier(db, {"name": "Поставщик неверного статуса"})
+    product, _ = upsert_product(db, {"name": "Товар неверного статуса"})
+    offer = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier.id,
+            "product_id": product.id,
+            "price": Decimal("1500.00"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+
+    with pytest.raises(ValueError, match="verification_status"):
+        verify_supplier_offer(db, offer.id, "Не проверено")
 
 def test_current_supplier_offers_exclude_expired(db):
     supplier, _ = upsert_supplier(
@@ -682,6 +799,38 @@ def test_current_supplier_offers_exclude_expired(db):
     assert current_offer.id in offer_ids
     assert expired_offer.id not in offer_ids
 
+
+def test_get_all_supplier_offers_includes_expired(db):
+    from app.commercial.service import get_all_supplier_offers
+
+    supplier, _ = upsert_supplier(
+        db,
+        {"name": "Поставщик всех предложений"},
+    )
+    product, _ = upsert_product(
+        db,
+        {"name": "Товар всех предложений"},
+    )
+
+    expired_offer = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier.id,
+            "product_id": product.id,
+            "price": Decimal("900"),
+            "received_at": datetime.now() - timedelta(days=30),
+            "valid_until": datetime.now() - timedelta(days=1),
+            "source_type": "manual",
+        },
+    )
+
+    offers = get_all_supplier_offers(
+        db,
+        supplier_id=supplier.id,
+        product_id=product.id,
+    )
+
+    assert expired_offer.id in {offer.id for offer in offers}
 
 def test_negative_supplier_offer_price_is_rejected(db):
     supplier, _ = upsert_supplier(
@@ -916,3 +1065,369 @@ def test_normalize_unknown_unit_rejects_missing_database_conversion(
             db=db,
             product_id=product.id,
         )
+
+def test_compare_supplier_offers_ranks_by_total_cost(db, test_id):
+    from app.commercial.service import compare_supplier_offers
+
+    product, _ = upsert_product(
+        db,
+        {"name": f"Товар сравнения-{test_id}", "unit": "шт."},
+    )
+    supplier_one, _ = upsert_supplier(
+        db, {"name": f"Поставщик дорогой-{test_id}"}
+    )
+    supplier_two, _ = upsert_supplier(
+        db, {"name": f"Поставщик выгодный-{test_id}"}
+    )
+
+    expensive = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_one.id,
+            "product_id": product.id,
+            "price": Decimal("100"),
+            "unit": "шт.",
+            "available_quantity": Decimal("20"),
+            "delivery_cost": Decimal("500"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+    cheaper = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_two.id,
+            "product_id": product.id,
+            "price": Decimal("110"),
+            "unit": "шт.",
+            "available_quantity": Decimal("20"),
+            "delivery_cost": Decimal("0"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+
+    result = compare_supplier_offers(
+        db,
+        product.id,
+        Decimal("10"),
+    )
+
+    ranked_ids = [
+        item["offer"].id
+        for item in result["ranked_offers"]
+    ]
+
+    assert ranked_ids == [cheaper.id, expensive.id]
+    assert result["ranked_offers"][0]["goods_total"] == Decimal("1100")
+    assert result["ranked_offers"][0]["landed_total"] == Decimal("1100")
+    assert result["ranked_offers"][1]["landed_total"] == Decimal("1500")
+
+
+def test_compare_supplier_offers_does_not_rank_unknown_delivery_or_quantity(
+    db,
+    test_id,
+):
+    from app.commercial.service import compare_supplier_offers
+
+    product, _ = upsert_product(
+        db,
+        {"name": f"Товар неполных данных-{test_id}", "unit": "шт."},
+    )
+    supplier_one, _ = upsert_supplier(
+        db, {"name": f"Поставщик без доставки-{test_id}"}
+    )
+    supplier_two, _ = upsert_supplier(
+        db, {"name": f"Поставщик без количества-{test_id}"}
+    )
+
+    no_delivery = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_one.id,
+            "product_id": product.id,
+            "price": Decimal("10"),
+            "unit": "шт.",
+            "available_quantity": Decimal("20"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+    no_quantity = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_two.id,
+            "product_id": product.id,
+            "price": Decimal("5"),
+            "unit": "шт.",
+            "delivery_cost": Decimal("0"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+
+    result = compare_supplier_offers(
+        db,
+        product.id,
+        Decimal("10"),
+    )
+
+    ranked_ids = [
+        item["offer"].id
+        for item in result["ranked_offers"]
+    ]
+    unranked_ids = {
+        item["offer"].id
+        for item in result["unranked_offers"]
+    }
+
+    assert ranked_ids == []
+    assert unranked_ids == {no_delivery.id, no_quantity.id}
+
+
+def test_compare_supplier_offers_normalizes_kg_to_g(db, test_id):
+    from app.commercial.service import compare_supplier_offers
+
+    product, _ = upsert_product(
+        db,
+        {"name": f"Товар пересчёта кг-г-{test_id}", "unit": "г"},
+    )
+    supplier, _ = upsert_supplier(
+        db,
+        {"name": f"Поставщик кг-г-{test_id}"},
+    )
+
+    offer = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier.id,
+            "product_id": product.id,
+            "price": Decimal("1200"),
+            "unit": "кг",
+            "available_quantity": Decimal("5"),
+            "delivery_cost": Decimal("100"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+
+    result = compare_supplier_offers(
+        db,
+        product.id,
+        Decimal("2000"),
+    )
+
+    assert len(result["ranked_offers"]) == 1
+    ranked = result["ranked_offers"][0]
+
+    assert ranked["offer"].id == offer.id
+    assert ranked["normalized_unit_price"] == Decimal("1.200")
+    assert ranked["available_quantity"] == Decimal("5000")
+    assert ranked["goods_total"] == Decimal("2400.000")
+    assert ranked["landed_total"] == Decimal("2500.000")
+    assert result["unranked_offers"] == []
+
+
+def test_compare_supplier_offers_uses_supplier_packaging_override(db, test_id):
+    from app.commercial.service import compare_supplier_offers
+
+    product, _ = upsert_product(
+        db,
+        {"name": f"Товар упаковочного пересчёта-{test_id}", "unit": "шт."},
+    )
+    supplier_global, _ = upsert_supplier(
+        db,
+        {"name": f"Поставщик общей упаковки-{test_id}"},
+    )
+    supplier_override, _ = upsert_supplier(
+        db,
+        {"name": f"Поставщик индивидуальной упаковки-{test_id}"},
+    )
+
+    upsert_product_unit_conversion(
+        db,
+        {
+            "product_id": product.id,
+            "source_unit": "упаковка",
+            "target_unit": "шт.",
+            "conversion_factor": Decimal("10"),
+        },
+    )
+    upsert_product_unit_conversion(
+        db,
+        {
+            "product_id": product.id,
+            "supplier_id": supplier_override.id,
+            "source_unit": "упаковка",
+            "target_unit": "шт.",
+            "conversion_factor": Decimal("20"),
+        },
+    )
+
+    offer_global = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_global.id,
+            "product_id": product.id,
+            "price": Decimal("100"),
+            "unit": "упаковка",
+            "available_quantity": Decimal("100"),
+            "delivery_cost": Decimal("0"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+    offer_override = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_override.id,
+            "product_id": product.id,
+            "price": Decimal("100"),
+            "unit": "упаковка",
+            "available_quantity": Decimal("50"),
+            "delivery_cost": Decimal("0"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+
+    result = compare_supplier_offers(
+        db,
+        product.id,
+        Decimal("1000"),
+    )
+
+    ranked = result["ranked_offers"]
+
+    assert len(ranked) == 2
+    assert ranked[0]["offer"].id == offer_override.id
+    assert ranked[1]["offer"].id == offer_global.id
+
+    assert ranked[0]["normalized_unit_price"] == Decimal("5.000")
+    assert ranked[0]["available_quantity"] == Decimal("1000")
+    assert ranked[0]["landed_total"] == Decimal("5000.000")
+
+    assert ranked[1]["normalized_unit_price"] == Decimal("10.000")
+    assert ranked[1]["available_quantity"] == Decimal("1000")
+    assert ranked[1]["landed_total"] == Decimal("10000.000")
+
+    assert result["unranked_offers"] == []
+
+
+def test_compare_supplier_offers_keeps_expired_offers_separate(db, test_id):
+    from app.commercial.service import compare_supplier_offers
+
+    product, _ = upsert_product(
+        db,
+        {"name": f"Товар просроченных предложений-{test_id}", "unit": "шт."},
+    )
+    supplier_ranked, _ = upsert_supplier(
+        db, {"name": f"Поставщик просроченный с ценой-{test_id}"}
+    )
+    supplier_unranked, _ = upsert_supplier(
+        db, {"name": f"Поставщик просроченный без доставки-{test_id}"}
+    )
+
+    expired_ranked = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_ranked.id,
+            "product_id": product.id,
+            "price": Decimal("25"),
+            "unit": "шт.",
+            "available_quantity": Decimal("100"),
+            "delivery_cost": Decimal("50"),
+            "received_at": datetime.now() - timedelta(days=10),
+            "valid_until": datetime.now() - timedelta(days=1),
+            "source_type": "manual",
+        },
+    )
+    expired_unranked = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_unranked.id,
+            "product_id": product.id,
+            "price": Decimal("20"),
+            "unit": "шт.",
+            "available_quantity": Decimal("100"),
+            "received_at": datetime.now() - timedelta(days=10),
+            "valid_until": datetime.now() - timedelta(days=1),
+            "source_type": "manual",
+        },
+    )
+
+    result = compare_supplier_offers(db, product.id, Decimal("10"))
+
+    assert result["ranked_offers"] == []
+    assert result["unranked_offers"] == []
+
+    assert len(result["expired_offers"]) == 1
+    ranked = result["expired_offers"][0]
+    assert ranked["offer"].id == expired_ranked.id
+    assert ranked["landed_total"] == Decimal("300")
+    assert ranked["freshness_status"] == "Требуется перепроверка"
+    assert ranked["freshness_warning"] == (
+        "Требуется уточнить у поставщика актуальность цены и наличия"
+    )
+
+    assert len(result["expired_unranked_offers"]) == 1
+    unranked = result["expired_unranked_offers"][0]
+    assert unranked["offer"].id == expired_unranked.id
+    assert unranked["reason"] == "Стоимость доставки не указана"
+    assert unranked["freshness_status"] == "Требуется перепроверка"
+    assert unranked["freshness_warning"] == (
+        "Требуется уточнить у поставщика актуальность цены и наличия"
+    )
+
+def test_compare_supplier_offers_excludes_rejected_and_insufficient_quantity(
+    db,
+    test_id,
+):
+    from app.commercial.service import compare_supplier_offers
+
+    product, _ = upsert_product(
+        db,
+        {"name": f"Товар проверки доступности-{test_id}", "unit": "шт."},
+    )
+    suppliers = []
+    for suffix in ("достаточно", "мало", "отклонён"):
+        supplier, _ = upsert_supplier(
+            db,
+            {"name": f"Поставщик {suffix}-{test_id}"},
+        )
+        suppliers.append(supplier)
+
+    def make_offer(supplier, quantity):
+        return create_supplier_offer(
+            db,
+            {
+                "supplier_id": supplier.id,
+                "product_id": product.id,
+                "price": Decimal("10"),
+                "unit": "шт.",
+                "available_quantity": Decimal(quantity),
+                "delivery_cost": Decimal("0"),
+                "received_at": datetime.now(),
+                "source_type": "manual",
+            },
+        )
+
+    sufficient_offer = make_offer(suppliers[0], "100")
+    insufficient_offer = make_offer(suppliers[1], "5")
+    rejected_offer = make_offer(suppliers[2], "100")
+    verify_supplier_offer(db, rejected_offer.id, "Отклонено")
+
+    result = compare_supplier_offers(
+        db,
+        product.id,
+        Decimal("10"),
+    )
+
+    ranked = result["ranked_offers"]
+    assert len(ranked) == 1
+    assert ranked[0]["offer"].id == sufficient_offer.id
+    assert ranked[0]["verification_status"] == "Не проверено"
+    assert len(result["unranked_offers"]) == 1
+    unranked = result["unranked_offers"][0]
+    assert unranked["offer"].id == insufficient_offer.id
+    assert unranked["reason"] == "Недостаточно товара у поставщика"

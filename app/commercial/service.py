@@ -4,11 +4,13 @@ from decimal import Decimal, InvalidOperation
 from sqlalchemy.orm import Session
 
 from app.database import TenderDB
+from app.commercial.unit_normalizer import get_unit_definition, normalize_unit_price
 from app.commercial.models import (
     ManufacturerDB,
     SupplierDB,
     ProductDB,
     SupplierOfferDB,
+    SupplierOfferVerificationDB,
     PriceListImportDB,
     CommercialAnalysisDB,
     CommercialMatchDB,
@@ -469,7 +471,6 @@ def create_supplier_offer(db: Session, offer_data: dict):
         "valid_until",
         "source_type",
         "source_reference",
-        "verification_status",
         "notes",
     }
 
@@ -525,7 +526,7 @@ def create_supplier_offer(db: Session, offer_data: dict):
                 "delivery_time_days должно быть неотрицательным целым числом"
             )
 
-    offer = SupplierOfferDB(**offer_data)
+    offer = SupplierOfferDB(**offer_data, verification_status="Не проверено")
 
     try:
         db.add(offer)
@@ -538,6 +539,83 @@ def create_supplier_offer(db: Session, offer_data: dict):
         db.rollback()
         raise
 
+
+
+def verify_supplier_offer(
+    db: Session,
+    offer_id: int,
+    verification_status: str,
+    verified_by: str = None,
+    notes: str = None,
+    verified_at: datetime = None,
+):
+    """Изменяет статус предложения и сохраняет отдельную запись аудита."""
+
+    allowed_statuses = {"Подтверждено", "Отклонено"}
+
+    if verification_status not in allowed_statuses:
+        raise ValueError(
+            "verification_status должен быть 'Подтверждено' или 'Отклонено'"
+        )
+
+    if verified_by is not None and not isinstance(verified_by, str):
+        raise ValueError("verified_by должен быть строкой")
+
+    if notes is not None and not isinstance(notes, str):
+        raise ValueError("notes должны быть строкой")
+
+    if verified_at is None:
+        verified_at = datetime.now()
+    elif not isinstance(verified_at, datetime):
+        raise ValueError("verified_at должен быть объектом datetime")
+
+    offer = db.get(SupplierOfferDB, offer_id)
+
+    if offer is None:
+        raise ValueError("Предложение поставщика не найдено")
+
+    verification = SupplierOfferVerificationDB(
+        offer_id=offer.id,
+        verification_status=verification_status,
+        verified_at=verified_at,
+        verified_by=verified_by.strip() or None if verified_by is not None else None,
+        notes=notes,
+    )
+
+    try:
+        offer.verification_status = verification_status
+        db.add(verification)
+        db.commit()
+        db.refresh(offer)
+        db.refresh(verification)
+
+        return verification
+
+    except Exception:
+        db.rollback()
+        raise
+def get_all_supplier_offers(
+    db: Session,
+    supplier_id: int = None,
+    product_id: int = None,
+):
+    """Возвращает все предложения, включая предложения с истёкшим сроком."""
+
+    query = db.query(SupplierOfferDB)
+
+    if supplier_id is not None:
+        query = query.filter(
+            SupplierOfferDB.supplier_id == supplier_id
+        )
+
+    if product_id is not None:
+        query = query.filter(
+            SupplierOfferDB.product_id == product_id
+        )
+
+    return query.order_by(
+        SupplierOfferDB.received_at.desc()
+    ).all()
 
 def get_current_supplier_offers(
     db: Session,
@@ -747,3 +825,185 @@ def get_commercial_matches(db: Session, analysis_id: int):
         .order_by(CommercialMatchDB.id.asc())
         .all()
     )
+
+
+def compare_supplier_offers(
+    db: Session,
+    product_id: int,
+    required_quantity,
+):
+    """Сравнивает актуальные предложения по полной стоимости закупки."""
+
+    try:
+        quantity = Decimal(str(required_quantity))
+    except (InvalidOperation, TypeError, ValueError):
+        raise ValueError("Некорректное требуемое количество")
+
+    if not quantity.is_finite() or quantity <= 0:
+        raise ValueError("Требуемое количество должно быть больше нуля")
+
+    product = db.get(ProductDB, product_id)
+
+    if product is None:
+        raise ValueError("Товар не найден")
+
+    if not product.unit:
+        raise ValueError("У товара не указана единица измерения")
+
+    def normalize_quantity(value, source_unit, target_unit, supplier_id):
+        source_name = " ".join(source_unit.lower().strip().split())
+        target_name = " ".join(target_unit.lower().strip().split())
+
+        source_definition = get_unit_definition(source_name)
+        target_definition = get_unit_definition(target_name)
+
+        if source_definition and target_definition:
+            source_family, source_factor, _ = source_definition
+            target_family, target_factor, _ = target_definition
+
+            if source_family != target_family:
+                raise ValueError(
+                    "Нельзя пересчитывать единицы разных физических категорий"
+                )
+
+            return value * source_factor / target_factor
+
+        if source_name == target_name:
+            return value
+
+        conversion = get_product_unit_conversion(
+            db=db,
+            product_id=product_id,
+            source_unit=source_unit,
+            target_unit=target_unit,
+            supplier_id=supplier_id,
+        )
+
+        if conversion is None:
+            raise ValueError(
+                f"Не найден коэффициент пересчёта: "
+                f"{source_unit} → {target_unit}"
+            )
+
+        factor = Decimal(str(conversion.conversion_factor))
+
+        if not factor.is_finite() or factor <= 0:
+            raise ValueError("Некорректный коэффициент пересчёта")
+
+        return value * factor
+
+    ranked_offers = []
+    unranked_offers = []
+    expired_offers = []
+    expired_unranked_offers = []
+
+    offers = get_all_supplier_offers(
+        db=db,
+        product_id=product_id,
+    )
+
+    for offer in offers:
+        if offer.verification_status == "Отклонено":
+            continue
+
+        is_expired = (
+            offer.valid_until is not None
+            and offer.valid_until < datetime.now()
+        )
+        freshness_status = (
+            "Требуется перепроверка"
+            if is_expired
+            else "Срок не указан"
+            if offer.valid_until is None
+            else "Не просрочено"
+        )
+        freshness_warning = (
+            "Требуется уточнить у поставщика актуальность цены и наличия"
+            if is_expired
+            else None
+        )
+
+        supplier = db.get(SupplierDB, offer.supplier_id)
+
+        def add_unranked(reason):
+            target = expired_unranked_offers if is_expired else unranked_offers
+            target.append({
+                "offer": offer,
+                "supplier": supplier,
+                "reason": reason,
+                "freshness_status": freshness_status,
+                "freshness_warning": freshness_warning,
+            })
+
+        if not offer.unit:
+            add_unranked("У предложения не указана единица измерения")
+            continue
+
+        if offer.available_quantity is None:
+            add_unranked("Количество у поставщика не указано")
+            continue
+
+        if offer.delivery_cost is None:
+            add_unranked("Стоимость доставки не указана")
+            continue
+
+        try:
+            available = Decimal(str(offer.available_quantity))
+            delivery_cost = Decimal(str(offer.delivery_cost))
+
+            if not available.is_finite() or available < 0:
+                raise ValueError("Некорректное доступное количество")
+
+            if not delivery_cost.is_finite() or delivery_cost < 0:
+                raise ValueError("Некорректная стоимость доставки")
+
+            available_target = normalize_quantity(
+                available,
+                offer.unit,
+                product.unit,
+                offer.supplier_id,
+            )
+
+            if available_target < quantity:
+                add_unranked("Недостаточно товара у поставщика")
+                continue
+
+            normalized_price = normalize_unit_price(
+                price=offer.price,
+                source_unit=offer.unit,
+                target_unit=product.unit,
+                db=db,
+                product_id=product_id,
+                supplier_id=offer.supplier_id,
+            )
+
+        except (ValueError, InvalidOperation, TypeError) as exc:
+            add_unranked(str(exc))
+            continue
+
+        goods_total = normalized_price * quantity
+        landed_total = goods_total + delivery_cost
+
+        target = expired_offers if is_expired else ranked_offers
+        target.append({
+            "offer": offer,
+            "supplier": supplier,
+            "normalized_unit_price": normalized_price,
+            "goods_total": goods_total,
+            "delivery_cost": delivery_cost,
+            "landed_total": landed_total,
+            "verification_status": offer.verification_status,
+            "available_quantity": available_target,
+            "freshness_status": freshness_status,
+            "freshness_warning": freshness_warning,
+        })
+
+    ranked_offers.sort(key=lambda item: item["landed_total"])
+    expired_offers.sort(key=lambda item: item["landed_total"])
+
+    return {
+        "ranked_offers": ranked_offers,
+        "unranked_offers": unranked_offers,
+        "expired_offers": expired_offers,
+        "expired_unranked_offers": expired_unranked_offers,
+    }
