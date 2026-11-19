@@ -20,3 +20,6 @@ venv/
 
 # Uploaded tender documents
 data/documents/
+
+# Uploaded commercial supplier price lists
+data/commercial/price_lists/
