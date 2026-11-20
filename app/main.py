@@ -25,6 +25,14 @@ from app.documents.doc_reader import extract_text_from_doc
 from app.documents.html_reader import extract_text_from_html
 from app.documents.extraction_service import extract_document_blocks
 from app.documents.persistence_service import save_document_with_chunks
+from app.documents.models import (
+    TenderDocumentDB,
+    TenderAnalysisDB,
+    TenderRequirementDB,
+)
+from app.documents.analysis_service import (
+    analyze_and_save_document_requirements,
+)
 
 from app.ai.technical_analyst import analyze_technical_requirements
 from app.ai.legal_analyst import analyze_legal_requirements
@@ -192,6 +200,122 @@ async def upload_document(
             status_code=500,
             detail="Ошибка при обработке документа",
         )
+
+
+@app.post("/documents/{document_id}/analyze")
+async def analyze_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return await analyze_and_save_document_requirements(
+            db=db,
+            document_id=document_id,
+        )
+
+    except ValueError as exc:
+        message = str(exc)
+
+        if message == "Документ не найден":
+            status_code = 404
+        elif message in {
+            "У документа нет текстовых фрагментов",
+            "Текст документа пуст",
+        }:
+            status_code = 400
+        else:
+            status_code = 422
+
+        raise HTTPException(
+            status_code=status_code,
+            detail=message,
+        )
+
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Ошибка анализа документа",
+        )
+
+
+@app.get("/documents/{document_id}/requirements")
+def get_document_requirements(
+    document_id: int,
+    analysis_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    document = db.get(TenderDocumentDB, document_id)
+
+    if document is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Документ не найден",
+        )
+
+    if analysis_id is not None:
+        analysis = (
+            db.query(TenderAnalysisDB)
+            .filter(
+                TenderAnalysisDB.id == analysis_id,
+                TenderAnalysisDB.document_id == document_id,
+                TenderAnalysisDB.status == "Завершён",
+            )
+            .first()
+        )
+    else:
+        analysis = (
+            db.query(TenderAnalysisDB)
+            .filter(
+                TenderAnalysisDB.document_id == document_id,
+                TenderAnalysisDB.status == "Завершён",
+            )
+            .order_by(
+                TenderAnalysisDB.created_at.desc(),
+                TenderAnalysisDB.id.desc(),
+            )
+            .first()
+        )
+
+    if analysis is None:
+        if analysis_id is not None:
+            raise HTTPException(
+                status_code=404,
+                detail="Завершённый анализ не найден",
+            )
+
+        return {
+            "document_id": document_id,
+            "analysis_id": None,
+            "requirements": [],
+        }
+
+    requirements = (
+        db.query(TenderRequirementDB)
+        .filter(
+            TenderRequirementDB.document_id == document_id,
+            TenderRequirementDB.analysis_id == analysis.id,
+        )
+        .order_by(TenderRequirementDB.id)
+        .all()
+    )
+
+    return {
+        "document_id": document_id,
+        "analysis_id": analysis.id,
+        "requirements": [
+            {
+                "id": item.id,
+                "requirement_type": item.requirement_type,
+                "requirement_text": item.requirement_text,
+                "attributes": item.attributes,
+                "source_chunk_id": item.source_chunk_id,
+                "evidence_quote": item.evidence_quote,
+                "confidence": item.confidence,
+                "extraction_status": item.extraction_status,
+            }
+            for item in requirements
+        ],
+    }
 
 
 @app.post("/commercial/imports/excel/preview")

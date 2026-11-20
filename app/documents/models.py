@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column,
@@ -56,7 +56,7 @@ class TenderDocumentDB(Base):
     created_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
     )
 
 
@@ -99,7 +99,7 @@ class DocumentChunkDB(Base):
     created_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
     )
 
 
@@ -132,7 +132,7 @@ class TenderAnalysisDB(Base):
     created_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
     )
 
     completed_at = Column(DateTime, nullable=True)
@@ -184,5 +184,5 @@ class TenderRequirementDB(Base):
     created_at = Column(
         DateTime,
         nullable=False,
-        default=datetime.utcnow,
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
     )
