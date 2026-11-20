@@ -27,6 +27,9 @@ from app.commercial.models import (
     SupplierOfferVerificationDB,
     SupplierProductMappingDB,
     ProductUnitConversionDB,
+    CommercialAnalysisDB,
+    CommercialMatchRunDB,
+    CommercialMatchDB,
 )
 
 from app.documents import models as document_models  # noqa: F401
@@ -85,6 +88,43 @@ def main():
                 text("ALTER TABLE supplier_offers ADD COLUMN unit VARCHAR")
             )
             print("Добавлена колонка supplier_offers.unit")
+
+        product_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("products")
+        }
+
+        if "technical_attributes" not in product_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE products "
+                    "ADD COLUMN technical_attributes JSON"
+                )
+            )
+            print("Добавлена колонка products.technical_attributes")
+
+        match_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("commercial_matches")
+        }
+
+        if "tender_requirement_id" not in match_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE commercial_matches "
+                    "ADD COLUMN tender_requirement_id INTEGER"
+                )
+            )
+            print("Добавлена колонка commercial_matches.tender_requirement_id")
+
+        if "match_run_id" not in match_columns:
+            connection.execute(
+                text(
+                    "ALTER TABLE commercial_matches "
+                    "ADD COLUMN match_run_id INTEGER"
+                )
+            )
+            print("Добавлена колонка commercial_matches.match_run_id")
 
     db = SessionLocal()
 

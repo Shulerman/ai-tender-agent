@@ -1,10 +1,17 @@
+import json
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.orm import Session
 
 from app.database import TenderDB
+from app.documents.models import (
+    TenderDocumentDB,
+    TenderAnalysisDB,
+    TenderRequirementDB,
+)
 from app.commercial.unit_normalizer import get_unit_definition, normalize_unit_price
+from app.commercial.matcher import compare_product_to_requirement, ALGORITHM_VERSION
 from app.commercial.models import (
     ManufacturerDB,
     SupplierDB,
@@ -14,6 +21,7 @@ from app.commercial.models import (
     PriceListImportDB,
     CommercialAnalysisDB,
     CommercialMatchDB,
+    CommercialMatchRunDB,
     ProductUnitConversionDB,
 )
 
@@ -175,6 +183,7 @@ def upsert_product(db: Session, product_data: dict):
         "manufacturer_id",
         "description",
         "technical_characteristics",
+        "technical_attributes",
         "unit",
         "category",
     }
@@ -712,6 +721,8 @@ def create_commercial_match(db: Session, match_data: dict):
 
     allowed_fields = {
         "analysis_id",
+        "tender_requirement_id",
+        "match_run_id",
         "product_id",
         "offer_id",
         "tender_requirement",
@@ -744,6 +755,86 @@ def create_commercial_match(db: Session, match_data: dict):
 
     if analysis is None:
         raise ValueError("Коммерческий анализ не найден")
+
+    tender_requirement_id = match_data.get("tender_requirement_id")
+    match_run_id = match_data.get("match_run_id")
+
+    requirement = None
+
+    if tender_requirement_id is not None:
+        requirement = db.get(TenderRequirementDB, tender_requirement_id)
+
+        if requirement is None:
+            raise ValueError("Требование тендера не найдено")
+
+        requirement_analysis = db.get(
+            TenderAnalysisDB,
+            requirement.analysis_id,
+        )
+        document = db.get(TenderDocumentDB, requirement.document_id)
+
+        if requirement_analysis is None or document is None:
+            raise ValueError("Не удалось проверить источник требования")
+
+        if requirement_analysis.document_id != requirement.document_id:
+            raise ValueError("Требование не соответствует анализу документа")
+
+        tender = db.query(TenderDB).filter(
+            TenderDB.tender_id == analysis.tender_id
+        ).first()
+
+        if tender is None or document.tender_id is None:
+            raise ValueError("Документ требования не связан с тендером")
+
+        if document.tender_id != tender.id:
+            raise ValueError("Требование относится к другому тендеру")
+
+    if match_run_id is not None:
+        match_run = db.get(CommercialMatchRunDB, match_run_id)
+
+        if match_run is None:
+            raise ValueError("Запуск сопоставления не найден")
+
+        if match_run.commercial_analysis_id != analysis.id:
+            raise ValueError(
+                "Запуск сопоставления относится к другому коммерческому анализу"
+            )
+
+        if (
+            requirement is not None
+            and match_run.tender_analysis_id != requirement.analysis_id
+        ):
+            raise ValueError(
+                "Требование не относится к анализу этого запуска"
+            )
+
+        if match_run.tender_analysis_id is not None:
+            run_analysis = db.get(
+                TenderAnalysisDB,
+                match_run.tender_analysis_id,
+            )
+
+            if run_analysis is None:
+                raise ValueError("Анализ тендера запуска не найден")
+
+            run_document = db.get(
+                TenderDocumentDB,
+                run_analysis.document_id,
+            )
+            tender = db.query(TenderDB).filter(
+                TenderDB.tender_id == analysis.tender_id
+            ).first()
+
+            if (
+                run_document is None
+                or tender is None
+                or run_document.tender_id != tender.id
+            ):
+                raise ValueError(
+                    "Анализ запуска относится к другому тендеру"
+                )
+
+
 
     product_id = match_data.get("product_id")
     offer_id = match_data.get("offer_id")
@@ -826,6 +917,189 @@ def get_commercial_matches(db: Session, analysis_id: int):
         .all()
     )
 
+
+def run_commercial_matcher(
+    db: Session,
+    analysis_id: int,
+    tender_analysis_id: int,
+):
+    """Запускает автоматическое сопоставление требований с каталогом."""
+
+    analysis = db.get(CommercialAnalysisDB, analysis_id)
+    if analysis is None:
+        raise ValueError("Коммерческий анализ не найден")
+
+    tender_analysis = db.get(TenderAnalysisDB, tender_analysis_id)
+    if tender_analysis is None:
+        raise ValueError("Анализ требований тендера не найден")
+
+    if tender_analysis.analysis_type != "technical_requirements":
+        raise ValueError("Выбранный анализ не является техническим анализом")
+
+    if tender_analysis.status != "Завершён":
+        raise ValueError("Технический анализ ещё не завершён")
+
+    document = db.get(TenderDocumentDB, tender_analysis.document_id)
+    tender = db.query(TenderDB).filter(
+        TenderDB.tender_id == analysis.tender_id
+    ).first()
+
+    if document is None or tender is None or document.tender_id != tender.id:
+        raise ValueError("Анализ требований относится к другому тендеру")
+
+    run = CommercialMatchRunDB(
+        commercial_analysis_id=analysis.id,
+        tender_analysis_id=tender_analysis.id,
+        status="Выполняется",
+        algorithm_version=ALGORITHM_VERSION,
+        started_at=datetime.now(),
+    )
+
+    try:
+        db.add(run)
+        db.flush()
+
+        requirements = (
+            db.query(TenderRequirementDB)
+            .filter(
+                TenderRequirementDB.analysis_id == tender_analysis.id,
+                TenderRequirementDB.document_id == document.id,
+                TenderRequirementDB.requirement_type == "product",
+            )
+            .order_by(TenderRequirementDB.id.asc())
+            .all()
+        )
+
+        products = (
+            db.query(ProductDB)
+            .order_by(ProductDB.id.asc())
+            .all()
+        )
+
+        statistics = {
+            "requirements_total": len(requirements),
+            "products_checked": 0,
+            "matches_created": 0,
+            "full_matches": 0,
+            "potential_analogues": 0,
+            "insufficient_data": 0,
+        }
+
+        for requirement in requirements:
+            attributes = requirement.attributes
+            if not isinstance(attributes, dict):
+                continue
+
+            required_attributes = attributes.get("attributes", [])
+            if not isinstance(required_attributes, list):
+                required_attributes = []
+
+            for product in products:
+                statistics["products_checked"] += 1
+
+                result = compare_product_to_requirement(
+                    required_attributes,
+                    product.technical_attributes,
+                )
+
+                if not result["is_candidate"]:
+                    statistics["insufficient_data"] += 1
+                    continue
+
+                requirement_evidence = {}
+                for attribute in required_attributes:
+                    if not isinstance(attribute, dict):
+                        continue
+                    attribute_name = attribute.get("name")
+                    attribute_evidence = attribute.get("evidence", [])
+                    if (
+                        isinstance(attribute_name, str)
+                        and isinstance(attribute_evidence, list)
+                        and attribute_evidence
+                    ):
+                        requirement_evidence[attribute_name] = (
+                            attribute_evidence
+                        )
+
+                evidence_references = {
+                    "evidence_quote": requirement.evidence_quote,
+                    "source_chunk_id": requirement.source_chunk_id,
+                    "extraction_status": requirement.extraction_status,
+                    "requirement_attribute_evidence": requirement_evidence,
+                    "evidence_note": (
+                        "Цитаты подтверждают требования тендера, "
+                        "но не являются доказательствами характеристик "
+                        "товара в каталоге"
+                    ),
+                }
+
+                match = CommercialMatchDB(
+                    analysis_id=analysis.id,
+                    tender_requirement_id=requirement.id,
+                    match_run_id=run.id,
+                    product_id=product.id,
+                    tender_requirement=requirement.requirement_text,
+                    match_status=result["match_status"],
+                    match_score=result["match_score"],
+                    confirmed_characteristics=json.dumps(
+                        result["confirmed_characteristics"],
+                        ensure_ascii=False,
+                    ),
+                    missing_characteristics=json.dumps(
+                        result["missing_characteristics"],
+                        ensure_ascii=False,
+                    ),
+                    discrepancies=json.dumps(
+                        result["discrepancies"],
+                        ensure_ascii=False,
+                    ),
+                    evidence_status=(
+                        requirement.extraction_status or "Не проверено"
+                    ),
+                    evidence_references=json.dumps(
+                        evidence_references,
+                        ensure_ascii=False,
+                    ),
+                    currency="RUB",
+                    notes="Автоматическое сопоставление, требуется проверка",
+                    recommendation=(
+                        "Проверить характеристики и документальные доказательства"
+                    ),
+                    created_at=datetime.now(),
+                )
+
+                db.add(match)
+                statistics["matches_created"] += 1
+
+                if result["match_status"] == "Полное соответствие":
+                    statistics["full_matches"] += 1
+                elif result["match_status"] == "Потенциальный аналог":
+                    statistics["potential_analogues"] += 1
+
+        run.status = "Завершён"
+        run.completed_at = datetime.now()
+        run.statistics = statistics
+
+        db.commit()
+        db.refresh(run)
+
+        return run
+
+    except Exception as error:
+        db.rollback()
+
+        failed_run = CommercialMatchRunDB(
+            commercial_analysis_id=analysis_id,
+            tender_analysis_id=tender_analysis_id,
+            status="Ошибка",
+            algorithm_version=ALGORITHM_VERSION,
+            started_at=run.started_at,
+            completed_at=datetime.now(),
+            error=str(error),
+        )
+        db.add(failed_run)
+        db.commit()
+        raise
 
 def compare_supplier_offers(
     db: Session,

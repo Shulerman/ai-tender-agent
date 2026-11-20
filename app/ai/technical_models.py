@@ -11,6 +11,17 @@ class Evidence(BaseModel):
     relevance_explanation: str = ""
 
 
+class ProductAttribute(BaseModel):
+    """Одна извлечённая техническая характеристика товара."""
+
+    name: str
+    value: str
+    unit: str | None = None
+    operator: str | None = None
+    is_required: bool | None = None
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
 class ProductAnalysis(BaseModel):
     name: str
     quantity: str
@@ -18,6 +29,7 @@ class ProductAnalysis(BaseModel):
     technical_characteristics: str = NOT_SPECIFIED
     packaging_requirements: str = NOT_SPECIFIED
     quality_and_standards: str = NOT_SPECIFIED
+    attributes: list[ProductAttribute] = Field(default_factory=list)
     quotes: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
     evidence_status: str = EVIDENCE_NOT_CHECKED

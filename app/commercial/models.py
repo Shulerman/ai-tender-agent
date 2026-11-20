@@ -1,3 +1,4 @@
+from datetime import datetime
 from sqlalchemy import (
     Column,
     Integer,
@@ -108,6 +109,7 @@ class ProductDB(Base):
 
     description = Column(Text, nullable=True)
     technical_characteristics = Column(Text, nullable=True)
+    technical_attributes = Column(JSON, nullable=True)
     unit = Column(String, nullable=True)
     category = Column(String, nullable=True)
     created_at = Column(DateTime, nullable=True)
@@ -371,6 +373,36 @@ class CommercialAnalysisDB(Base):
     completed_at = Column(DateTime, nullable=True)
 
 
+
+class CommercialMatchRunDB(Base):
+    """История отдельного запуска сопоставления требований с каталогом."""
+
+    __tablename__ = "commercial_match_runs"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    commercial_analysis_id = Column(
+        Integer,
+        ForeignKey("commercial_analyses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    tender_analysis_id = Column(
+        Integer,
+        ForeignKey("tender_analyses.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    status = Column(String(30), nullable=False, default="Ожидает запуска")
+    algorithm_version = Column(String(50), nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    error = Column(Text, nullable=True)
+    statistics = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
 class CommercialMatchDB(Base):
     """Сопоставление требования тендера с товаром и предложением."""
 
@@ -382,6 +414,20 @@ class CommercialMatchDB(Base):
         Integer,
         ForeignKey("commercial_analyses.id"),
         nullable=False,
+        index=True,
+    )
+
+    tender_requirement_id = Column(
+        Integer,
+        ForeignKey("tender_requirements.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    match_run_id = Column(
+        Integer,
+        ForeignKey("commercial_match_runs.id", ondelete="SET NULL"),
+        nullable=True,
         index=True,
     )
 
@@ -431,3 +477,4 @@ class CommercialMatchDB(Base):
     recommendation = Column(Text, nullable=True)
 
     created_at = Column(DateTime, nullable=True)
+

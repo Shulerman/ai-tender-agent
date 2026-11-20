@@ -1,18 +1,27 @@
 from datetime import datetime, timedelta
 from decimal import Decimal
+import json
 import uuid
 
 import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.database import SessionLocal, TenderDB
+from app.documents.models import (
+    TenderDocumentDB,
+    TenderAnalysisDB,
+    TenderRequirementDB,
+)
 from app.commercial.models import (
     PriceListImportRowDB,
     SupplierOfferVerificationDB,
     ProductUnitConversionDB,
+    CommercialMatchRunDB,
+    CommercialMatchDB,
 )
 from app.commercial.unit_normalizer import normalize_unit_price
 from app.commercial.service import (
+    run_commercial_matcher,
     upsert_manufacturer,
     upsert_supplier,
     upsert_product,
@@ -72,6 +81,82 @@ def create_test_analysis(db):
         db,
         {"tender_id": tender.tender_id},
     )
+
+
+def create_test_requirement(db, tender):
+    """Создаёт документ, анализ и требование для тестового тендера."""
+
+    document = TenderDocumentDB(
+        document_uuid=str(uuid.uuid4()),
+        tender_id=tender.id,
+        original_name="matcher_test.html",
+        file_path="matcher_test.html",
+        file_hash=None,
+        detected_extension=".html",
+        size_bytes=100,
+    )
+    db.add(document)
+    db.flush()
+
+    tender_analysis = TenderAnalysisDB(
+        document_id=document.id,
+        analysis_type="technical_requirements",
+        status="Завершён",
+        result_json={},
+    )
+    db.add(tender_analysis)
+    db.flush()
+
+    requirement_attributes = {
+        "name": "Тестовый товар",
+        "attributes": [
+            {
+                "name": "diameter",
+                "value": 10,
+                "unit": "mm",
+                "operator": "=",
+                "is_required": True,
+                "evidence": [
+                    {
+                        "claim": "Диаметр должен быть 10 мм",
+                        "quote": "Диаметр изделия должен составлять 10 мм",
+                    }
+                ],
+            },
+            {
+                "name": "material",
+                "value": "steel",
+                "unit": None,
+                "operator": "=",
+                "is_required": True,
+                "evidence": [],
+            },
+        ],
+        "evidence": [
+            {
+                "claim": "Требуется товар с диаметром 10 мм",
+                "quote": "Диаметр изделия должен составлять 10 мм",
+            }
+        ],
+    }
+
+    requirement = TenderRequirementDB(
+        document_id=document.id,
+        analysis_id=tender_analysis.id,
+        requirement_type="product",
+        requirement_text="Тестовое требование к товару",
+        attributes=requirement_attributes,
+        evidence_quote="Диаметр изделия должен составлять 10 мм",
+        extraction_status="Проверено",
+    )
+    db.add(requirement)
+    db.commit()
+
+    db.refresh(document)
+    db.refresh(tender_analysis)
+    db.refresh(requirement)
+
+    return document, tender_analysis, requirement
 
 
 def create_test_import(db, test_id):
@@ -898,6 +983,151 @@ def test_create_commercial_match(db):
     assert match.match_score == Decimal("85.00")
 
 
+def test_upsert_product_persists_technical_attributes(db, test_id):
+    attributes = {
+        "diameter": {"value": 10, "unit": "mm"},
+        "material": {"value": "steel"},
+    }
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар с техническими атрибутами-{test_id}",
+            "technical_attributes": attributes,
+        },
+    )
+
+    assert product.technical_attributes == attributes
+
+
+def test_create_commercial_match_with_requirement_and_run(db):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+
+    _, tender_analysis, requirement = create_test_requirement(db, tender)
+
+    match_run = CommercialMatchRunDB(
+        commercial_analysis_id=analysis.id,
+        tender_analysis_id=tender_analysis.id,
+    )
+    db.add(match_run)
+    db.commit()
+    db.refresh(match_run)
+
+    match = create_commercial_match(
+        db,
+        {
+            "analysis_id": analysis.id,
+            "tender_requirement_id": requirement.id,
+            "match_run_id": match_run.id,
+            "tender_requirement": requirement.requirement_text,
+        },
+    )
+
+    assert match.tender_requirement_id == requirement.id
+    assert match.match_run_id == match_run.id
+    assert match.analysis_id == analysis.id
+
+
+def test_match_rejects_requirement_from_another_tender(db):
+    analysis = create_test_analysis(db)
+    other_tender = create_test_tender(
+        db,
+        f"TEST-COMMERCIAL-OTHER-{uuid.uuid4().hex}",
+    )
+    _, _, requirement = create_test_requirement(db, other_tender)
+
+    with pytest.raises(ValueError, match="относится к другому тендеру"):
+        create_commercial_match(
+            db,
+            {
+                "analysis_id": analysis.id,
+                "tender_requirement_id": requirement.id,
+                "tender_requirement": requirement.requirement_text,
+            },
+        )
+
+
+def test_match_rejects_run_from_another_commercial_analysis(db):
+    analysis = create_test_analysis(db)
+    other_tender = create_test_tender(
+        db,
+        f"TEST-COMMERCIAL-OTHER-{uuid.uuid4().hex}",
+    )
+    other_analysis = create_commercial_analysis(
+        db,
+        {"tender_id": other_tender.tender_id},
+    )
+    _, tender_analysis, _ = create_test_requirement(db, other_tender)
+
+    match_run = CommercialMatchRunDB(
+        commercial_analysis_id=other_analysis.id,
+        tender_analysis_id=tender_analysis.id,
+    )
+    db.add(match_run)
+    db.commit()
+    db.refresh(match_run)
+
+    with pytest.raises(
+        ValueError,
+        match="относится к другому коммерческому анализу",
+    ):
+        create_commercial_match(
+            db,
+            {
+                "analysis_id": analysis.id,
+                "match_run_id": match_run.id,
+                "tender_requirement": "Проверка чужого запуска",
+            },
+        )
+
+
+def test_match_rejects_run_with_different_tender_analysis(db):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+
+    document, tender_analysis, requirement = create_test_requirement(
+        db,
+        tender,
+    )
+
+    other_tender_analysis = TenderAnalysisDB(
+        document_id=document.id,
+        analysis_type="technical_requirements",
+        status="Завершён",
+        result_json={},
+    )
+    db.add(other_tender_analysis)
+    db.commit()
+    db.refresh(other_tender_analysis)
+
+    match_run = CommercialMatchRunDB(
+        commercial_analysis_id=analysis.id,
+        tender_analysis_id=other_tender_analysis.id,
+    )
+    db.add(match_run)
+    db.commit()
+    db.refresh(match_run)
+
+    with pytest.raises(
+        ValueError,
+        match="не относится к анализу этого запуска",
+    ):
+        create_commercial_match(
+            db,
+            {
+                "analysis_id": analysis.id,
+                "tender_requirement_id": requirement.id,
+                "match_run_id": match_run.id,
+                "tender_requirement": requirement.requirement_text,
+            },
+        )
+
+
 def test_match_rejects_offer_for_another_product(db):
     analysis = create_test_analysis(db)
 
@@ -1431,3 +1661,144 @@ def test_compare_supplier_offers_excludes_rejected_and_insufficient_quantity(
     unranked = result["unranked_offers"][0]
     assert unranked["offer"].id == insufficient_offer.id
     assert unranked["reason"] == "Недостаточно товара у поставщика"
+
+
+def test_run_commercial_matcher_creates_full_match_and_preserves_evidence(
+    db,
+    test_id,
+):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, requirement = create_test_requirement(db, tender)
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Полностью подходящий товар-{test_id}",
+            "technical_attributes": {
+                "diameter": {"value": 10, "unit": "mm"},
+                "material": "steel",
+            },
+        },
+    )
+
+    run = run_commercial_matcher(
+        db,
+        analysis.id,
+        tender_analysis.id,
+    )
+
+    match = db.query(CommercialMatchDB).filter_by(
+        match_run_id=run.id,
+        product_id=product.id,
+    ).one()
+
+    evidence = json.loads(match.evidence_references)
+
+    assert run.status == "Завершён"
+    assert run.statistics["requirements_total"] == 1
+    # Matcher проверяет весь каталог, а не только товар этого теста.
+    assert run.statistics["products_checked"] >= 1
+    assert run.statistics["matches_created"] >= 1
+    assert run.statistics["full_matches"] >= 1
+    assert match.tender_requirement_id == requirement.id
+    assert match.match_status == "Полное соответствие"
+    assert evidence["requirement_attribute_evidence"]["diameter"][0][
+        "quote"
+    ] == "Диаметр изделия должен составлять 10 мм"
+    assert "не являются доказательствами характеристик" in evidence[
+        "evidence_note"
+    ]
+
+
+def test_run_commercial_matcher_separates_potential_analogues(
+    db,
+    test_id,
+):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, _ = create_test_requirement(db, tender)
+
+    full_product, _ = upsert_product(
+        db,
+        {
+            "name": f"Полное соответствие-{test_id}",
+            "technical_attributes": {
+                "diameter": {"value": 10, "unit": "mm"},
+                "material": "steel",
+            },
+        },
+    )
+    analogue_product, _ = upsert_product(
+        db,
+        {
+            "name": f"Потенциальный аналог-{test_id}",
+            "technical_attributes": {
+                "diameter": {"value": 10, "unit": "mm"},
+            },
+        },
+    )
+
+    run = run_commercial_matcher(
+        db,
+        analysis.id,
+        tender_analysis.id,
+    )
+
+    matches = db.query(CommercialMatchDB).filter_by(
+        match_run_id=run.id
+    ).all()
+    statuses = {
+        match.product_id: match.match_status
+        for match in matches
+    }
+
+    assert statuses[full_product.id] == "Полное соответствие"
+    assert statuses[analogue_product.id] == "Потенциальный аналог"
+    # В общей статистике могут учитываться товары из других тестов.
+    assert run.statistics["full_matches"] >= 1
+    assert run.statistics["potential_analogues"] >= 1
+    assert run.statistics["matches_created"] >= 2
+
+
+def test_run_commercial_matcher_does_not_create_match_without_confirmed_data(
+    db,
+    test_id,
+):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, _ = create_test_requirement(db, tender)
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар без подтверждённых данных-{test_id}",
+            "technical_attributes": {
+                "diameter": {"value": 12, "unit": "cm"},
+            },
+        },
+    )
+
+    run = run_commercial_matcher(
+        db,
+        analysis.id,
+        tender_analysis.id,
+    )
+
+    matches = db.query(CommercialMatchDB).filter_by(
+        match_run_id=run.id,
+        product_id=product.id,
+    ).all()
+
+    assert matches == []
+    assert run.status == "Завершён"
+    # Проверяем отсутствие совпадения для конкретного товара выше.
+    # Остальные товары каталога могут иметь собственные совпадения.
+    assert run.statistics["products_checked"] >= 1
+    assert run.statistics["insufficient_data"] >= 1

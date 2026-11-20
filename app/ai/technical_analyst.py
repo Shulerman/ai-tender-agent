@@ -63,6 +63,28 @@ def validate_analysis_evidence(
                         "в исходном тексте документа."
                     )
 
+            if item in analysis.products:
+                for attribute in item.attributes:
+                    for evidence in attribute.evidence:
+                        quote_result = validate_quotes(
+                            [evidence.quote],
+                            document_text,
+                        )
+
+                        if quote_result["accepted"]:
+                            evidence.relevance_status = "Ожидает проверки"
+                            evidence.relevance_explanation = (
+                                "Цитата найдена в документе. "
+                                "Соответствие цитаты утверждению "
+                                "ещё не проверено."
+                            )
+                        else:
+                            evidence.relevance_status = "Цитата не найдена"
+                            evidence.relevance_explanation = (
+                                "Указанная цитата отсутствует "
+                                "в исходном тексте документа."
+                            )
+
 
 async def analyze_technical_requirements(document_text: str) -> dict:
     """
@@ -94,8 +116,23 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 - technical_characteristics: технические характеристики;
 - packaging_requirements: требования к упаковке;
 - quality_and_standards: требования к качеству и стандартам;
+- attributes: список отдельных структурированных технических характеристик;
 - quotes: список точных цитат из документа;
 - evidence: список связок «утверждение — цитата».
+
+Для каждой записи attributes укажи:
+- name: название характеристики (например, «Диаметр», «Мощность», «Материал»);
+- value: значение характеристики без потери исходного смысла;
+- unit: единица измерения, если она указана, иначе null;
+- operator: оператор сравнения (>=, <=, =, >, <), если он явно указан или однозначно выражен словами «не менее», «не более», «больше», «меньше», «равно»; иначе null;
+- is_required: true или false только если обязательность явно следует из документа; иначе null;
+- evidence: список отдельных связок «утверждение — точная цитата».
+
+Не объединяй разные характеристики в одну запись.
+Не придумывай значения, единицы измерения и операторы.
+Сохраняй числовые диапазоны и составные значения без искажения.
+Если структурированную характеристику выделить невозможно, не создавай запись attributes ради заполнения списка.
+Каждая характеристика должна иметь собственную точную цитату в evidence, если такая цитата есть в документе.
 
 В evidence каждое утверждение должно быть связано
 с отдельной точной цитатой, которая относится именно к нему.
@@ -208,6 +245,21 @@ async def analyze_technical_requirements(document_text: str) -> dict:
       "technical_characteristics": "",
       "packaging_requirements": "",
       "quality_and_standards": "",
+      "attributes": [
+        {{
+          "name": "Название характеристики",
+          "value": "Значение",
+          "unit": null,
+          "operator": null,
+          "is_required": null,
+          "evidence": [
+            {{
+              "claim": "Конкретное утверждение о характеристике",
+              "quote": "Дословная цитата из документа"
+            }}
+          ]
+        }}
+      ],
       "quotes": [],
       "evidence": [
         {{

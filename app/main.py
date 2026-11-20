@@ -46,7 +46,11 @@ from app.commercial.models import (
     PriceListImportRowDB,
     SupplierOfferDB,
     SupplierOfferVerificationDB,
+    CommercialAnalysisDB,
+    CommercialMatchRunDB,
+    CommercialMatchDB,
 )
+
 from app.commercial.excel_importer import inspect_price_list
 from app.commercial.import_service import (
     _normalize,
@@ -57,7 +61,9 @@ from app.commercial.service import (
     get_all_supplier_offers,
     get_current_supplier_offers,
     verify_supplier_offer,
+    run_commercial_matcher,
 )
+
 
 
 app = FastAPI(
@@ -998,6 +1004,273 @@ async def analyze_full(payload: dict):
         )
 
 
+
+
+def _matcher_json_value(value):
+    """Преобразует сохранённое JSON-поле в Python-объект."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+
+
+def _matcher_run_payload(run):
+    return {
+        "id": run.id,
+        "commercial_analysis_id": run.commercial_analysis_id,
+        "tender_analysis_id": run.tender_analysis_id,
+        "status": run.status,
+        "algorithm_version": run.algorithm_version,
+        "started_at": run.started_at,
+        "completed_at": run.completed_at,
+        "error": run.error,
+        "statistics": run.statistics,
+        "created_at": run.created_at,
+    }
+
+
+def _matcher_result_payload(db, match):
+    product = db.get(ProductDB, match.product_id) if match.product_id else None
+    requirement = (
+        db.get(TenderRequirementDB, match.tender_requirement_id)
+        if match.tender_requirement_id
+        else None
+    )
+
+    return {
+        "id": match.id,
+        "match_run_id": match.match_run_id,
+        "match_status": match.match_status,
+        "match_score": (
+            float(match.match_score)
+            if match.match_score is not None
+            else None
+        ),
+        "product": (
+            {
+                "id": product.id,
+                "name": product.name,
+                "article_number": product.article_number,
+                "manufacturer_id": product.manufacturer_id,
+                "description": product.description,
+                "technical_characteristics": product.technical_characteristics,
+                "technical_attributes": product.technical_attributes,
+                "unit": product.unit,
+                "category": product.category,
+            }
+            if product is not None
+            else None
+        ),
+        "offer_id": match.offer_id,
+        "tender_requirement": match.tender_requirement,
+        "requirement": (
+            {
+                "id": requirement.id,
+                "requirement_type": requirement.requirement_type,
+                "requirement_text": requirement.requirement_text,
+                "attributes": requirement.attributes,
+                "evidence_quote": requirement.evidence_quote,
+                "extraction_status": requirement.extraction_status,
+            }
+            if requirement is not None
+            else None
+        ),
+        "confirmed_characteristics": _matcher_json_value(
+            match.confirmed_characteristics
+        ),
+        "missing_characteristics": _matcher_json_value(
+            match.missing_characteristics
+        ),
+        "discrepancies": _matcher_json_value(match.discrepancies),
+        "evidence_status": match.evidence_status,
+        "evidence_references": _matcher_json_value(
+            match.evidence_references
+        ),
+        "estimated_quantity": (
+            float(match.estimated_quantity)
+            if match.estimated_quantity is not None
+            else None
+        ),
+        "estimated_unit_price": (
+            float(match.estimated_unit_price)
+            if match.estimated_unit_price is not None
+            else None
+        ),
+        "estimated_total_price": (
+            float(match.estimated_total_price)
+            if match.estimated_total_price is not None
+            else None
+        ),
+        "currency": match.currency,
+        "notes": match.notes,
+        "recommendation": match.recommendation,
+        "created_at": match.created_at,
+    }
+
+
+def _run_commercial_matcher_api(
+    analysis_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Запускает сопоставление товаров с требованиями тендера."""
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="Тело запроса должно быть JSON-объектом",
+        )
+
+    if set(payload) != {"tender_analysis_id"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Ожидается только поле tender_analysis_id",
+        )
+
+    tender_analysis_id = payload.get("tender_analysis_id")
+    if (
+        isinstance(tender_analysis_id, bool)
+        or not isinstance(tender_analysis_id, int)
+        or tender_analysis_id <= 0
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="tender_analysis_id должен быть положительным целым числом",
+        )
+
+    try:
+        run = run_commercial_matcher(
+            db=db,
+            analysis_id=analysis_id,
+            tender_analysis_id=tender_analysis_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = (
+            404
+            if message in {
+                "Коммерческий анализ не найден",
+                "Анализ требований тендера не найден",
+            }
+            else 400
+        )
+        raise HTTPException(status_code=status_code, detail=message)
+
+    return _matcher_run_payload(run)
+
+
+@app.post("/commercial/analyses/{analysis_id}/matches/run")
+def run_commercial_matcher_endpoint(
+    analysis_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    return _run_commercial_matcher_api(analysis_id, payload, db)
+
+
+@app.get("/commercial/analyses/{analysis_id}/match-runs")
+def get_commercial_match_runs(
+    analysis_id: int,
+    db: Session = Depends(get_db),
+):
+    """Возвращает историю запусков сопоставления, новые первыми."""
+
+    if db.get(CommercialAnalysisDB, analysis_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Коммерческий анализ не найден",
+        )
+
+    runs = (
+        db.query(CommercialMatchRunDB)
+        .filter(
+            CommercialMatchRunDB.commercial_analysis_id == analysis_id
+        )
+        .order_by(
+            CommercialMatchRunDB.created_at.desc(),
+            CommercialMatchRunDB.id.desc(),
+        )
+        .all()
+    )
+    return [_matcher_run_payload(run) for run in runs]
+
+
+@app.get("/commercial/analyses/{analysis_id}/matches")
+def get_commercial_analysis_matches(
+    analysis_id: int,
+    run_id: int | None = None,
+    db: Session = Depends(get_db),
+):
+    """Возвращает полные совпадения и потенциальные аналоги отдельно."""
+
+    if db.get(CommercialAnalysisDB, analysis_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Коммерческий анализ не найден",
+        )
+
+    if run_id is not None:
+        run = db.get(CommercialMatchRunDB, run_id)
+        if run is None or run.commercial_analysis_id != analysis_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Запуск сопоставления не найден для указанного анализа",
+            )
+    else:
+        run = (
+            db.query(CommercialMatchRunDB)
+            .filter(
+                CommercialMatchRunDB.commercial_analysis_id == analysis_id
+            )
+            .order_by(
+                CommercialMatchRunDB.created_at.desc(),
+                CommercialMatchRunDB.id.desc(),
+            )
+            .first()
+        )
+
+    if run is None:
+        return {
+            "analysis_id": analysis_id,
+            "run_id": None,
+            "full_matches": [],
+            "potential_analogues": [],
+        }
+
+    matches = (
+        db.query(CommercialMatchDB)
+        .filter(
+            CommercialMatchDB.analysis_id == analysis_id,
+            CommercialMatchDB.match_run_id == run.id,
+        )
+        .order_by(CommercialMatchDB.id.asc())
+        .all()
+    )
+
+    full_matches = []
+    potential_analogues = []
+
+    for match in matches:
+        item = _matcher_result_payload(db, match)
+        if match.match_status == "Полное соответствие":
+            full_matches.append(item)
+        elif match.match_status == "Потенциальный аналог":
+            potential_analogues.append(item)
+
+    return {
+        "analysis_id": analysis_id,
+        "run_id": run.id,
+        "full_matches": full_matches,
+        "potential_analogues": potential_analogues,
+    }
+
+
+
 @app.get("/commercial/offers")
 def list_commercial_offers(
     supplier_id: int | None = None,
@@ -1146,3 +1419,4 @@ def get_commercial_offer_verifications(
         }
         for item in verifications
     ]
+

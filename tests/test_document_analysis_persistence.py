@@ -93,6 +93,23 @@ def test_analyze_and_save_document_requirements(
                     "technical_characteristics": "Не указано",
                     "packaging_requirements": "Не указано",
                     "quality_and_standards": "Не указано",
+                    "attributes": [
+                        {
+                            "name": "Диаметр",
+                            "value": "20",
+                            "unit": "мм",
+                            "operator": ">=",
+                            "is_required": True,
+                            "evidence": [
+                                {
+                                    "claim": "Диаметр не менее 20 мм",
+                                    "quote": "Диаметр изделия — не менее 20 мм.",
+                                    "relevance_status": "Ожидает проверки",
+                                    "relevance_explanation": "Цитата найдена.",
+                                }
+                            ],
+                        }
+                    ],
                     "quotes": [
                         "Поставка товара в течение 10 рабочих дней."
                     ],
@@ -132,6 +149,7 @@ def test_analyze_and_save_document_requirements(
     assert analysis.status == "Завершён"
     assert analysis.completed_at is not None
     assert analysis.result_json["products"][0]["name"] == "Тестовый товар"
+    assert analysis.result_json["products"][0]["attributes"][0]["name"] == "Диаметр"
 
     requirement = db.query(TenderRequirementDB).filter_by(
         analysis_id=analysis.id
@@ -147,6 +165,11 @@ def test_analyze_and_save_document_requirements(
     )
     assert requirement.confidence is None
     assert requirement.extraction_status == "Источник найден"
+    assert requirement.attributes["attributes"][0]["name"] == "Диаметр"
+    assert requirement.attributes["attributes"][0]["operator"] == ">="
+    assert requirement.attributes["attributes"][0]["evidence"][0]["quote"] == (
+        "Диаметр изделия — не менее 20 мм."
+    )
 
 
 def test_analyzer_error_is_saved_without_requirements(

@@ -102,6 +102,16 @@ def fake_analysis_result():
                 "technical_characteristics": "Не указано",
                 "packaging_requirements": "Не указано",
                 "quality_and_standards": "Не указано",
+                "attributes": [
+                    {
+                        "name": "Диаметр",
+                        "value": "20",
+                        "unit": "мм",
+                        "operator": ">=",
+                        "is_required": True,
+                        "evidence": [],
+                    }
+                ],
                 "quotes": [
                     "Поставка товара в течение 10 рабочих дней."
                 ],
@@ -196,6 +206,12 @@ def test_get_latest_document_requirements(
     )
     assert requirement["confidence"] is None
     assert requirement["extraction_status"] == "Источник найден"
+    assert requirement["attributes"]["attributes"][0]["name"] == "Диаметр"
+    assert requirement["attributes"]["attributes"][0]["value"] == "20"
+    assert requirement["attributes"]["attributes"][0]["unit"] == "мм"
+    assert requirement["attributes"]["attributes"][0]["operator"] == ">="
+    assert requirement["attributes"]["attributes"][0]["is_required"] is True
+    assert requirement["attributes"]["attributes"][0]["evidence"] == []
 
 
 def test_get_requirements_by_analysis_id(
