@@ -719,6 +719,266 @@ def test_reimport_uses_supplier_product_mapping(
     assert offers[0].import_id != offers[1].import_id
 
 
+
+
+
+def test_import_rejects_supplier_mapping_with_ambiguous_catalog_article(
+    db,
+    test_id,
+    tmp_path,
+    monkeypatch,
+):
+    supplier = create_supplier(db, test_id)
+    mapped_product = create_product(
+        db,
+        test_id,
+        f"Товар из mapping {test_id}",
+        f"DUP-CATALOG-{test_id}",
+    )
+    create_product(
+        db,
+        test_id,
+        f"Другой товар с дублирующимся артикулом {test_id}",
+        f"DUP-CATALOG-{test_id}",
+    )
+
+    now = datetime.now()
+    db.add(
+        SupplierProductMappingDB(
+            supplier_id=supplier.id,
+            supplier_article_number=f"SUP-DUP-{test_id}",
+            normalized_supplier_article_number=f"sup-dup-{test_id}",
+            product_id=mapped_product.id,
+            supplier_product_name="Название поставщика",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    db.commit()
+
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            [
+                f"SUP-DUP-{test_id}",
+                "Название поставщика",
+                500,
+                "RUB",
+                "шт.",
+            ],
+        ],
+    )
+
+    parsed = {
+        "file_name": file_path.name,
+        "sheet_name": "Прайс",
+        "items": [
+            {
+                "source_row": 2,
+                "source_name": "Название поставщика",
+                "source_article_number": f"SUP-DUP-{test_id}",
+                "name": "Название поставщика",
+                "article_number": f"DUP-CATALOG-{test_id}",
+                "price": Decimal("500"),
+                "currency": "RUB",
+                "unit": "шт.",
+                "available_quantity": None,
+                "valid_until": None,
+                "delivery_time_days": None,
+            },
+        ],
+        "errors": [],
+    }
+
+    monkeypatch.setattr(
+        "app.commercial.import_service.parse_price_list",
+        lambda *args, **kwargs: parsed,
+    )
+
+    result = run_import(db, supplier, file_path)
+
+    row = db.query(PriceListImportRowDB).filter_by(
+        import_id=result["import_id"]
+    ).one()
+    offers = db.query(SupplierOfferDB).filter_by(
+        import_id=result["import_id"]
+    ).all()
+
+    assert row.product_id is None
+    assert row.status == "Требует сопоставления"
+    assert offers == []
+    assert result["matched_offers"] == 0
+    assert result["unmatched_rows"] == 1
+def test_import_accepts_supplier_mapping_when_catalog_article_agrees(
+    db,
+    test_id,
+    tmp_path,
+    monkeypatch,
+):
+    supplier = create_supplier(db, test_id)
+    product = create_product(
+        db,
+        test_id,
+        f"Товар с согласованными артикулами {test_id}",
+        f"CATALOG-AGREE-{test_id}",
+    )
+
+    now = datetime.now()
+    db.add(
+        SupplierProductMappingDB(
+            supplier_id=supplier.id,
+            supplier_article_number=f"SUP-AGREE-{test_id}",
+            normalized_supplier_article_number=f"sup-agree-{test_id}",
+            product_id=product.id,
+            supplier_product_name="Название поставщика",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    db.commit()
+
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            [
+                f"SUP-AGREE-{test_id}",
+                "Название поставщика",
+                500,
+                "RUB",
+                "шт.",
+            ],
+        ],
+    )
+
+    parsed = {
+        "file_name": file_path.name,
+        "sheet_name": "Прайс",
+        "items": [
+            {
+                "source_row": 2,
+                "source_name": "Название поставщика",
+                "source_article_number": f"SUP-AGREE-{test_id}",
+                "name": "Название поставщика",
+                "article_number": f"CATALOG-AGREE-{test_id}",
+                "price": Decimal("500"),
+                "currency": "RUB",
+                "unit": "шт.",
+                "available_quantity": None,
+                "valid_until": None,
+                "delivery_time_days": None,
+            },
+        ],
+        "errors": [],
+    }
+
+    monkeypatch.setattr(
+        "app.commercial.import_service.parse_price_list",
+        lambda *args, **kwargs: parsed,
+    )
+
+    result = run_import(db, supplier, file_path)
+
+    row = db.query(PriceListImportRowDB).filter_by(
+        import_id=result["import_id"]
+    ).one()
+    offers = db.query(SupplierOfferDB).filter_by(
+        import_id=result["import_id"]
+    ).all()
+
+    assert row.product_id == product.id
+    assert row.status == "Сопоставлен"
+    assert len(offers) == 1
+    assert offers[0].product_id == product.id
+    assert result["matched_offers"] == 1
+    assert result["unmatched_rows"] == 0
+def test_import_rejects_conflicting_supplier_mapping_and_catalog_article(
+    db,
+    test_id,
+    tmp_path,
+    monkeypatch,
+):
+    supplier = create_supplier(db, test_id)
+    mapped_product = create_product(
+        db,
+        test_id,
+        f"Товар из постоянного соответствия {test_id}",
+        f"SUPPLIER-CATALOG-A-{test_id}",
+    )
+    catalog_product = create_product(
+        db,
+        test_id,
+        f"Товар по артикулу каталога {test_id}",
+        f"CATALOG-B-{test_id}",
+    )
+
+    now = datetime.now()
+    db.add(
+        SupplierProductMappingDB(
+            supplier_id=supplier.id,
+            supplier_article_number=f"SUP-{test_id}",
+            normalized_supplier_article_number=f"sup-{test_id}",
+            product_id=mapped_product.id,
+            supplier_product_name="Старое название поставщика",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    db.commit()
+
+    file_path = create_excel_file(
+        tmp_path,
+        [
+            [
+                f"SUP-{test_id}",
+                "Новое название поставщика",
+                500,
+                "RUB",
+                "шт.",
+            ],
+        ],
+    )
+
+    parsed = {
+        "file_name": file_path.name,
+        "sheet_name": "Прайс",
+        "items": [
+            {
+                "source_row": 2,
+                "source_name": "Новое название поставщика",
+                "source_article_number": f"SUP-{test_id}",
+                "name": "Новое название поставщика",
+                "article_number": f"CATALOG-B-{test_id}",
+                "price": Decimal("500"),
+                "currency": "RUB",
+                "unit": "шт.",
+                "available_quantity": None,
+                "valid_until": None,
+                "delivery_time_days": None,
+            },
+        ],
+        "errors": [],
+    }
+
+    monkeypatch.setattr(
+        "app.commercial.import_service.parse_price_list",
+        lambda *args, **kwargs: parsed,
+    )
+
+    result = run_import(db, supplier, file_path)
+
+    row = db.query(PriceListImportRowDB).filter_by(
+        import_id=result["import_id"]
+    ).one()
+
+    offers = db.query(SupplierOfferDB).filter_by(
+        import_id=result["import_id"]
+    ).all()
+
+    assert row.product_id is None
+    assert row.status == "Требует сопоставления"
+    assert offers == []
+    assert result["matched_offers"] == 0
+    assert result["unmatched_rows"] == 1
 def test_manual_match_without_article_does_not_create_mapping(
     db,
     test_id,
@@ -851,3 +1111,6 @@ def test_supplier_product_mapping_is_isolated_between_suppliers(
     assert db.query(SupplierOfferDB).filter_by(
         import_id=second_result["import_id"],
     ).count() == 0
+
+
+

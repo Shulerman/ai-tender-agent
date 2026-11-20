@@ -259,7 +259,29 @@ def import_price_list(
                 )
 
             if mapping is not None:
-                product = db.get(ProductDB, mapping.product_id)
+                mapped_product = db.get(ProductDB, mapping.product_id)
+                catalog_article = _normalize(item.get("article_number"))
+
+                if mapped_product is None:
+                    product = None
+                elif catalog_article:
+                    article_matches = [
+                        candidate
+                        for candidate in products
+                        if _normalize(candidate.article_number) == catalog_article
+                    ]
+
+                    if len(article_matches) == 0:
+                        product = mapped_product
+                    elif (
+                        len(article_matches) == 1
+                        and article_matches[0].id == mapped_product.id
+                    ):
+                        product = mapped_product
+                    else:
+                        product = None
+                else:
+                    product = mapped_product
             else:
                 product = _find_existing_product(
                     products,
