@@ -2,9 +2,9 @@ from pathlib import Path
 from pypdf import PdfReader
 
 
-def extract_text_from_pdf(file_path: str) -> str:
+def extract_pages_from_pdf(file_path: str) -> list[dict]:
     """
-    Извлекает текст из PDF-документа.
+    Извлекает текст PDF с сохранением границ и номеров страниц.
     """
 
     path = Path(file_path)
@@ -17,12 +17,23 @@ def extract_text_from_pdf(file_path: str) -> str:
 
     reader = PdfReader(str(path))
 
-    pages_text = []
+    return [
+        {
+            "page_number": page_number,
+            "text": page.extract_text() or "",
+        }
+        for page_number, page in enumerate(reader.pages, start=1)
+    ]
 
-    for page_number, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
-        pages_text.append(
-            f"\n--- Страница {page_number} ---\n{text}"
-        )
 
-    return "\n".join(pages_text).strip()
+def extract_text_from_pdf(file_path: str) -> str:
+    """
+    Извлекает текст из PDF-документа в прежнем текстовом формате.
+    """
+
+    pages = extract_pages_from_pdf(file_path)
+
+    return "\n".join(
+        f"\n--- Страница {page['page_number']} ---\n{page['text']}"
+        for page in pages
+    ).strip()

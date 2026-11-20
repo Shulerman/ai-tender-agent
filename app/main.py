@@ -23,6 +23,8 @@ from app.documents.pdf_reader import extract_text_from_pdf
 from app.documents.docx_reader import extract_text_from_docx
 from app.documents.doc_reader import extract_text_from_doc
 from app.documents.html_reader import extract_text_from_html
+from app.documents.extraction_service import extract_document_blocks
+from app.documents.persistence_service import save_document_with_chunks
 
 from app.ai.technical_analyst import analyze_technical_requirements
 from app.ai.legal_analyst import analyze_legal_requirements
@@ -123,8 +125,18 @@ def health():
 
 
 @app.post("/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(
+    file: UploadFile = File(...),
+    tender_id: int | None = Form(default=None),
+    db: Session = Depends(get_db),
+):
     try:
+        if tender_id is not None and db.get(TenderDB, tender_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Тендер не найден",
+            )
+
         document = await save_document(file)
 
         extension = document["detected_extension"]
@@ -145,15 +157,29 @@ async def upload_document(file: UploadFile = File(...)):
         else:
             raise ValueError("Неподдерживаемый формат документа")
 
+        blocks = extract_document_blocks(file_path)
+
+        document_record = save_document_with_chunks(
+            db=db,
+            document=document,
+            blocks=blocks,
+            tender_id=tender_id,
+        )
+
         return {
             "message": "Документ успешно загружен и обработан",
             "document_id": document["document_id"],
+            "database_id": document_record.id,
+            "chunks_count": len(blocks),
             "original_name": document["original_name"],
             "detected_extension": extension,
             "size_bytes": document["size_bytes"],
             "text_length": len(extracted_text),
             "text": extracted_text,
         }
+
+    except HTTPException:
+        raise
 
     except (ValueError, FileNotFoundError) as exc:
         raise HTTPException(

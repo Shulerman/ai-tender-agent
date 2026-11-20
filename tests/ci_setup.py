@@ -29,6 +29,8 @@ from app.commercial.models import (
     ProductUnitConversionDB,
 )
 
+from app.documents import models as document_models  # noqa: F401
+
 VERSION_ID = "44-FZ-2026-10-01"
 
 TEST_ARTICLES = [

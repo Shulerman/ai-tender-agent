@@ -36,3 +36,30 @@ def extract_text_from_doc(file_path: str) -> str:
         )
 
     return text
+
+
+
+def extract_blocks_from_doc(file_path: str) -> list[dict]:
+    """Извлекает логические текстовые блоки DOC с порядковыми координатами."""
+
+    import re
+
+    text = extract_text_from_doc(file_path)
+
+    raw_blocks = re.split(r"\n\s*\n", text)
+    blocks = []
+
+    for block in raw_blocks:
+        normalized_text = " ".join(block.split())
+
+        if normalized_text:
+            blocks.append({
+                "locator_type": "text_block",
+                "locator_value": str(len(blocks) + 1),
+                "text": normalized_text,
+            })
+
+    if not blocks:
+        raise ValueError("Не удалось извлечь текстовые блоки из DOC")
+
+    return blocks
