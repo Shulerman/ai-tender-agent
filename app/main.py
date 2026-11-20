@@ -626,10 +626,14 @@ def get_commercial_product_duplicates(
         })
 
     for article, article_records in articles.items():
-        manufacturer_ids = {
-            item["manufacturer_id"]
+        known_manufacturer_records = [
+            item
             for item in article_records
             if item["manufacturer_id"] is not None
+        ]
+        manufacturer_ids = {
+            item["manufacturer_id"]
+            for item in known_manufacturer_records
         }
 
         if len(manufacturer_ids) > 1:
@@ -637,7 +641,7 @@ def get_commercial_product_duplicates(
                 "article_across_manufacturers",
                 article,
                 None,
-                article_records,
+                known_manufacturer_records,
                 True,
             )
 

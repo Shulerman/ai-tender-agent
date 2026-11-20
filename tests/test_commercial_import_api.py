@@ -611,6 +611,10 @@ def test_product_duplicates_api_groups_exact_matches(client, db):
             manufacturer_id=manufacturer_b.id,
         ),
         ProductDB(
+            name=f"Товар с тем же артикулом без производителя {token}",
+            article_number=f"AB-001-{token}",
+        ),
+        ProductDB(
             name=f"Товар без производителя 1 {token}",
             article_number=f"NO-MFR-{token}",
         ),
@@ -651,9 +655,14 @@ def test_product_duplicates_api_groups_exact_matches(client, db):
 
     assert len(groups_by_type["duplicate_article"]["products"]) == 2
     assert len(groups_by_type["duplicate_name"]["products"]) == 2
-    assert len(
-        groups_by_type["article_across_manufacturers"]["products"]
-    ) == 3
+    cross_manufacturer_products = groups_by_type[
+        "article_across_manufacturers"
+    ]["products"]
+    assert len(cross_manufacturer_products) == 3
+    assert all(
+        product["manufacturer_id"] is not None
+        for product in cross_manufacturer_products
+    )
 
     assert groups_by_type["article_across_manufacturers"][
         "requires_review"
