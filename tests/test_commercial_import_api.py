@@ -874,6 +874,93 @@ def test_commercial_offers_api_filters_and_includes_expired(client, db):
 
 
 
+def test_supplier_product_price_history_api_returns_all_snapshots(client, db):
+    from datetime import timedelta
+
+    offer, supplier, product = create_api_offer(db)
+    now = datetime.now()
+
+    offer.received_at = now - timedelta(days=2)
+    offer.valid_until = now - timedelta(days=1)
+    offer.price = 150
+    offer.available_quantity = 10
+    offer.verification_status = "Не проверено"
+
+    second = SupplierOfferDB(
+        supplier_id=supplier.id,
+        product_id=product.id,
+        price=150,
+        currency="RUB",
+        unit="шт.",
+        received_at=now - timedelta(days=1),
+        source_type="Excel",
+        payment_terms="Предоплата",
+        verification_status="Подтверждено",
+    )
+    third = SupplierOfferDB(
+        supplier_id=supplier.id,
+        product_id=product.id,
+        price=175,
+        currency="RUB",
+        unit="шт.",
+        received_at=now,
+        source_type="Excel",
+        verification_status="Не проверено",
+    )
+    db.add_all([second, third])
+    db.commit()
+    db.refresh(offer)
+    db.refresh(second)
+    db.refresh(third)
+
+    unrelated_offer, _, _ = create_api_offer(db)
+
+    response = client.get(
+        f"/commercial/products/{product.id}/suppliers/{supplier.id}/price-history"
+    )
+
+    assert response.status_code == 200
+    history = response.json()
+
+    assert [item["id"] for item in history] == [
+        third.id,
+        second.id,
+        offer.id,
+    ]
+    assert [float(item["price"]) for item in history] == [
+        175.0,
+        150.0,
+        150.0,
+    ]
+    assert all(item["currency"] == "RUB" for item in history)
+    assert history[0]["verification_status"] == "Не проверено"
+    assert history[1]["verification_status"] == "Подтверждено"
+    assert history[1]["source_type"] == "Excel"
+    assert history[1]["payment_terms"] == "Предоплата"
+    assert history[2]["available_quantity"] == 10
+    assert history[2]["freshness_status"] == "Требуется перепроверка"
+    assert history[2]["freshness_warning"] == (
+        "Требуется уточнить у поставщика актуальность цены и наличия"
+    )
+    assert all(item["supplier_id"] == supplier.id for item in history)
+    assert all(item["product_id"] == product.id for item in history)
+    assert unrelated_offer.id not in {item["id"] for item in history}
+
+
+def test_supplier_product_price_history_api_returns_404_for_missing_entities(client, db):
+    offer, supplier, product = create_api_offer(db)
+
+    missing_product = client.get(
+        f"/commercial/products/99999999/suppliers/{supplier.id}/price-history"
+    )
+    assert missing_product.status_code == 404
+
+    missing_supplier = client.get(
+        f"/commercial/products/{product.id}/suppliers/99999999/price-history"
+    )
+    assert missing_supplier.status_code == 404
+
+
 def test_commercial_offer_verification_api_confirms_offer(client, db):
     offer, _, _ = create_api_offer(db)
 

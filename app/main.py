@@ -1464,6 +1464,77 @@ def compare_match_supplier_offers(
 
 
 
+@app.get("/commercial/products/{product_id}/suppliers/{supplier_id}/price-history")
+def get_supplier_product_price_history(
+    product_id: int,
+    supplier_id: int,
+    db: Session = Depends(get_db),
+):
+    """Возвращает историю цен конкретного товара у конкретного поставщика."""
+
+    if db.get(ProductDB, product_id) is None:
+        raise HTTPException(status_code=404, detail="Товар не найден")
+
+    if db.get(SupplierDB, supplier_id) is None:
+        raise HTTPException(status_code=404, detail="Поставщик не найден")
+
+    offers = (
+        db.query(SupplierOfferDB)
+        .filter(
+            SupplierOfferDB.product_id == product_id,
+            SupplierOfferDB.supplier_id == supplier_id,
+        )
+        .order_by(
+            SupplierOfferDB.received_at.desc(),
+            SupplierOfferDB.id.desc(),
+        )
+        .all()
+    )
+
+    now = datetime.now()
+    history = []
+
+    for offer in offers:
+        is_expired = (
+            offer.valid_until is not None
+            and offer.valid_until < now
+        )
+        freshness_status = (
+            "Требуется перепроверка"
+            if is_expired
+            else "Срок не указан"
+            if offer.valid_until is None
+            else "Не просрочено"
+        )
+
+        history.append({
+            "id": offer.id,
+            "supplier_id": offer.supplier_id,
+            "product_id": offer.product_id,
+            "import_id": offer.import_id,
+            "price": offer.price,
+            "currency": offer.currency,
+            "unit": offer.unit,
+            "available_quantity": offer.available_quantity,
+            "availability_status": offer.availability_status,
+            "received_at": offer.received_at,
+            "valid_until": offer.valid_until,
+            "verification_status": offer.verification_status,
+            "delivery_time_days": offer.delivery_time_days,
+            "delivery_cost": offer.delivery_cost,
+            "payment_terms": offer.payment_terms,
+            "source_type": offer.source_type,
+            "freshness_status": freshness_status,
+            "freshness_warning": (
+                "Требуется уточнить у поставщика актуальность цены и наличия"
+                if is_expired
+                else None
+            ),
+        })
+
+    return history
+
+
 @app.get("/commercial/offers")
 def list_commercial_offers(
     supplier_id: int | None = None,
