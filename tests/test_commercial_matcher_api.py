@@ -363,7 +363,7 @@ def test_compare_offers_api_returns_ranked_offers(client, db):
         received_at=datetime.now(),
         valid_until=datetime.now() + timedelta(days=5),
         source_type="manual",
-        verification_status="Подтверждено",
+        verification_status="Не проверено",
     )
     db.add(offer)
     db.commit()
@@ -381,6 +381,9 @@ def test_compare_offers_api_returns_ranked_offers(client, db):
     assert float(result["estimated_quantity"]) == 10
     assert len(result["ranked_offers"]) == 1
     assert result["ranked_offers"][0]["supplier_name"] == supplier.name
+    assert result["ranked_offers"][0]["verification_status"] == "Не проверено"
+    assert result["ranked_offers"][0]["freshness_status"] == "Не просрочено"
+    assert result["ranked_offers"][0]["freshness_warning"] is None
     assert float(result["ranked_offers"][0]["landed_total"]) == 1500
     assert result["unranked_offers"] == []
     assert result["expired_offers"] == []
@@ -542,3 +545,57 @@ def test_select_commercial_match_offer_rejects_declined_offer(client, db):
     assert response.status_code == 422
     db.refresh(match)
     assert match.offer_id is None
+
+
+def test_compare_offers_api_keeps_expired_confirmed_offer_separate(client, db):
+    _, analysis, _, _ = create_scenario(db)
+
+    product = ProductDB(
+        name=f"Просроченный товар {uuid.uuid4().hex}",
+        unit="шт.",
+    )
+    supplier = SupplierDB(name=f"Поставщик просроченного товара {uuid.uuid4().hex}")
+    db.add_all([product, supplier])
+    db.flush()
+
+    match = CommercialMatchDB(
+        analysis_id=analysis.id,
+        product_id=product.id,
+        tender_requirement="10 штук",
+        match_status="Полное соответствие",
+        estimated_quantity=10,
+    )
+    db.add(match)
+    db.flush()
+
+    offer = SupplierOfferDB(
+        supplier_id=supplier.id,
+        product_id=product.id,
+        price=150,
+        unit="шт.",
+        available_quantity=100,
+        delivery_cost=0,
+        received_at=datetime.now(),
+        valid_until=datetime.now() - timedelta(days=1),
+        source_type="manual",
+        verification_status="Подтверждено",
+    )
+    db.add(offer)
+    db.commit()
+
+    response = client.get(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offers/compare"
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["ranked_offers"] == []
+    assert len(result["expired_offers"]) == 1
+
+    expired = result["expired_offers"][0]
+    assert expired["verification_status"] == "Подтверждено"
+    assert expired["freshness_status"] == "Требуется перепроверка"
+    assert expired["freshness_warning"] == (
+        "Требуется уточнить у поставщика актуальность цены и наличия"
+    )
+    assert float(expired["landed_total"]) == 1500
