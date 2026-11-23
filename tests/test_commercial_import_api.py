@@ -12,6 +12,7 @@ from app.commercial.models import (
     SupplierDB,
     ProductDB,
     ManufacturerDB,
+    PriceListImportDB,
     PriceListImportRowDB,
     SupplierOfferDB,
     SupplierOfferVerificationDB,
@@ -44,7 +45,7 @@ def client(db):
     main_module.app.dependency_overrides.clear()
 
 
-def create_excel():
+def create_excel(article_number="API-001", product_name="Тестовый товар API", price=150):
     workbook = Workbook()
     worksheet = workbook.active
     worksheet.title = "Прайс"
@@ -57,9 +58,9 @@ def create_excel():
         "Ед. изм.",
     ])
     worksheet.append([
-        "API-001",
-        "Тестовый товар API",
-        150,
+        article_number,
+        product_name,
+        price,
         "RUB",
         "шт.",
     ])
@@ -139,6 +140,117 @@ def test_excel_import_api(client, db, tmp_path, monkeypatch):
     assert result["file_hash"]
     assert result["result"]["import_id"] is not None
     assert result["result"]["total_rows"] == 1
+
+def test_reimport_same_excel_preserves_offer_history(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    supplier = SupplierDB(
+        name=f"API повторный импорт {uuid.uuid4().hex}"
+    )
+    unique_article = f"API-{uuid.uuid4().hex}"
+    product_name = f"Товар {unique_article}"
+    product = ProductDB(
+        name=product_name,
+        article_number=unique_article,
+        created_at=datetime.now(),
+    )
+    db.add_all([supplier, product])
+    db.commit()
+    db.refresh(supplier)
+    db.refresh(product)
+
+    monkeypatch.setattr(
+        main_module,
+        "COMMERCIAL_PRICE_LISTS_DIR",
+        tmp_path,
+    )
+
+    mapping = {
+        "article_number": 1,
+        "name": 2,
+        "price": 3,
+        "currency": 4,
+        "unit": 5,
+    }
+    file_content = create_excel(
+        article_number=unique_article,
+        product_name=product_name,
+        price=150,
+    )
+    changed_file_content = create_excel(
+        article_number=unique_article,
+        product_name=product_name,
+        price=175,
+    )
+    url = "/commercial/imports/excel"
+
+    def upload(content):
+        return client.post(
+            url,
+            data={
+                "supplier_id": str(supplier.id),
+                "column_mapping": json.dumps(
+                    mapping,
+                    ensure_ascii=False,
+                ),
+                "header_row": "1",
+                "sheet_name": "Прайс",
+            },
+            files={
+                "file": (
+                    "api_prices.xlsx",
+                    content,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    first_response = upload(file_content)
+    second_response = upload(file_content)
+    third_response = upload(changed_file_content)
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert third_response.status_code == 200
+
+    first = first_response.json()
+    second = second_response.json()
+    third = third_response.json()
+
+    assert first["file_hash"] == second["file_hash"]
+    assert first["file_hash"] != third["file_hash"]
+
+    import_ids = [
+        first["result"]["import_id"],
+        second["result"]["import_id"],
+        third["result"]["import_id"],
+    ]
+    assert len(set(import_ids)) == 3
+
+    imports = (
+        db.query(PriceListImportDB)
+        .filter(PriceListImportDB.id.in_(import_ids))
+        .all()
+    )
+    assert len(imports) == 3
+
+    offers = (
+        db.query(SupplierOfferDB)
+        .filter(
+            SupplierOfferDB.supplier_id == supplier.id,
+            SupplierOfferDB.product_id == product.id,
+            SupplierOfferDB.import_id.in_(import_ids),
+        )
+        .order_by(SupplierOfferDB.import_id)
+        .all()
+    )
+
+    assert len(offers) == 3
+    assert [offer.price for offer in offers] == [150, 150, 175]
+
 
 def create_unmatched_import(client, db, tmp_path, monkeypatch):
     supplier = SupplierDB(
