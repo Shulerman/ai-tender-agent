@@ -379,7 +379,7 @@ class CommercialMatchRunDB(Base):
 
     __tablename__ = "commercial_match_runs"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
 
     commercial_analysis_id = Column(
         Integer,
@@ -498,7 +498,7 @@ class ProductDuplicateReviewDB(Base):
         Index("ix_product_duplicate_reviews_product_id_2", "product_id_2"),
     )
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
 
     product_id_1 = Column(
         Integer,
