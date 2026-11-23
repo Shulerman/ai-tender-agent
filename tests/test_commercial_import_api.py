@@ -891,3 +891,71 @@ def test_commercial_offer_verification_history_api_returns_404_for_missing_offer
     )
 
     assert response.status_code == 404
+
+def test_product_duplicates_api_finds_potential_name_matches(client, db):
+    token = uuid.uuid4().hex
+
+    manufacturer_a = ManufacturerDB(name=f"Производитель A {token}")
+    manufacturer_b = ManufacturerDB(name=f"Производитель B {token}")
+    db.add_all([manufacturer_a, manufacturer_b])
+    db.flush()
+
+    first = ProductDB(
+        name=f"Кабель силовой медный 3х2.5 {token}",
+        manufacturer_id=manufacturer_a.id,
+        unit="м",
+        category="Кабель",
+    )
+    second = ProductDB(
+        name=f"Кабель силовой медный 3х2,5 {token}",
+        manufacturer_id=manufacturer_a.id,
+        unit="м",
+        category="Провод",
+    )
+    similar_without_attributes = ProductDB(
+        name=f"Кабель силовой медный 3х2.5 бухта {token}",
+        manufacturer_id=manufacturer_a.id,
+    )
+    unrelated = ProductDB(
+        name=f"Болт оцинкованный М8 {token}",
+        manufacturer_id=manufacturer_a.id,
+        unit="м",
+        category="Кабель",
+    )
+    other_manufacturer = ProductDB(
+        name=f"Кабель силовой медный 3х2,5 {token}",
+        manufacturer_id=manufacturer_b.id,
+        unit="м",
+        category="Провод",
+    )
+
+    db.add_all([
+        first,
+        second,
+        similar_without_attributes,
+        unrelated,
+        other_manufacturer,
+    ])
+    db.commit()
+
+    response = client.get("/commercial/products/duplicates")
+
+    assert response.status_code == 200
+
+    potential_groups = [
+        group
+        for group in response.json()["groups"]
+        if group["type"] == "potential_name_match"
+        and token in group["match_value"]
+    ]
+
+    assert len(potential_groups) == 1
+
+    group = potential_groups[0]
+    assert group["manufacturer_id"] == manufacturer_a.id
+    assert group["requires_review"] is True
+    assert group["similarity_percent"] >= 85
+    assert group["matching_attributes"] == ["unit"]
+    assert {
+        product["id"] for product in group["products"]
+    } == {first.id, second.id}

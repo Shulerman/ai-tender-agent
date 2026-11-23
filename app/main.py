@@ -1,4 +1,5 @@
 from datetime import datetime
+from difflib import SequenceMatcher
 import hashlib
 import json
 import tempfile
@@ -680,6 +681,60 @@ def get_commercial_product_duplicates(
                 products,
                 manufacturer_id is None,
             )
+
+    # Потенциальные дубли: отдельные пары для ручной проверки.
+    products_by_manufacturer = {}
+    for product, record in records:
+        if record["manufacturer_id"] is not None:
+            products_by_manufacturer.setdefault(
+                record["manufacturer_id"],
+                [],
+            ).append(record)
+
+    for manufacturer_id, manufacturer_products in products_by_manufacturer.items():
+        for index, first in enumerate(manufacturer_products):
+            first_name = _normalize(first["name"])
+            if not first_name:
+                continue
+
+            for second in manufacturer_products[index + 1:]:
+                second_name = _normalize(second["name"])
+                if not second_name or first_name == second_name:
+                    continue
+
+                similarity = SequenceMatcher(
+                    None,
+                    first_name,
+                    second_name,
+                ).ratio()
+
+                if similarity < 0.85:
+                    continue
+
+                matching_attributes = []
+                for field in ("category", "unit"):
+                    first_value = _normalize(first[field])
+                    second_value = _normalize(second[field])
+                    if (
+                        first_value
+                        and second_value
+                        and first_value == second_value
+                    ):
+                        matching_attributes.append(field)
+
+                if not matching_attributes:
+                    continue
+
+                groups.append({
+                    "type": "potential_name_match",
+                    "match_value": f'{first["name"]} <> {second["name"]}',
+                    "manufacturer_id": manufacturer_id,
+                    "manufacturer": first["manufacturer"],
+                    "requires_review": True,
+                    "similarity_percent": round(similarity * 100, 1),
+                    "matching_attributes": matching_attributes,
+                    "products": [first, second],
+                })
 
     groups.sort(
         key=lambda group: (
