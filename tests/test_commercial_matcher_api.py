@@ -440,3 +440,105 @@ def test_compare_offers_api_rejects_match_from_another_analysis(client, db):
     )
 
     assert response.status_code == 404
+
+
+
+def _create_match_with_offer(db, verification_status="Не проверено", expired=False):
+    _, analysis, _, _ = create_scenario(db)
+
+    product = ProductDB(
+        name=f"Товар выбора предложения {uuid.uuid4().hex}",
+        unit="шт.",
+    )
+    supplier = SupplierDB(
+        name=f"Поставщик выбора предложения {uuid.uuid4().hex}"
+    )
+    db.add_all([product, supplier])
+    db.flush()
+
+    match = CommercialMatchDB(
+        analysis_id=analysis.id,
+        product_id=product.id,
+        tender_requirement="10 штук",
+        match_status="Полное соответствие",
+        estimated_quantity=10,
+        notes="Существующая заметка",
+    )
+    db.add(match)
+    db.flush()
+
+    offer = SupplierOfferDB(
+        supplier_id=supplier.id,
+        product_id=product.id,
+        price=150,
+        currency="RUB",
+        unit="шт.",
+        available_quantity=100,
+        delivery_cost=100,
+        received_at=datetime.now(),
+        valid_until=(
+            datetime.now() - timedelta(days=1)
+            if expired
+            else datetime.now() + timedelta(days=5)
+        ),
+        source_type="manual",
+        verification_status=verification_status,
+    )
+    db.add(offer)
+    db.commit()
+    db.refresh(match)
+    db.refresh(offer)
+
+    return analysis, match, offer
+
+
+def test_select_commercial_match_offer_saves_calculated_prices(client, db):
+    analysis, match, offer = _create_match_with_offer(db)
+
+    response = client.put(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offer",
+        json={"offer_id": offer.id},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["offer_id"] == offer.id
+    assert result["verification_status"] == "Не проверено"
+    assert float(result["estimated_unit_price"]) == 150
+    assert float(result["estimated_total_price"]) == 1600
+    assert result["currency"] == "RUB"
+
+    db.refresh(match)
+    assert match.offer_id == offer.id
+    assert float(match.estimated_unit_price) == 150
+    assert float(match.estimated_total_price) == 1600
+    assert match.notes == "Существующая заметка"
+
+
+def test_select_commercial_match_offer_rejects_expired_offer(client, db):
+    analysis, match, offer = _create_match_with_offer(db, expired=True)
+
+    response = client.put(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offer",
+        json={"offer_id": offer.id},
+    )
+
+    assert response.status_code == 422
+    db.refresh(match)
+    assert match.offer_id is None
+
+
+def test_select_commercial_match_offer_rejects_declined_offer(client, db):
+    analysis, match, offer = _create_match_with_offer(
+        db,
+        verification_status="Отклонено",
+    )
+
+    response = client.put(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offer",
+        json={"offer_id": offer.id},
+    )
+
+    assert response.status_code == 422
+    db.refresh(match)
+    assert match.offer_id is None

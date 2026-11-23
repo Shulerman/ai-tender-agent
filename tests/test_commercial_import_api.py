@@ -16,6 +16,7 @@ from app.commercial.models import (
     PriceListImportRowDB,
     SupplierOfferDB,
     SupplierOfferVerificationDB,
+    ProductDuplicateReviewDB,
 )
 from app import main as main_module
 
@@ -1158,3 +1159,110 @@ def test_product_duplicates_api_finds_potential_name_matches(client, db):
     assert {
         product["id"] for product in group["products"]
     } == {first.id, second.id}
+
+
+def test_product_duplicate_review_api_create_list_and_update(client, db):
+    token = uuid.uuid4().hex
+    first = ProductDB(name=f"Товар первый {token}")
+    second = ProductDB(name=f"Товар второй {token}")
+    db.add_all([first, second])
+    db.commit()
+    db.refresh(first)
+    db.refresh(second)
+
+    response = client.post(
+        "/commercial/products/duplicate-reviews",
+        json={
+            "product_id_1": second.id,
+            "product_id_2": first.id,
+            "comment": "Проверить характеристики",
+        },
+    )
+
+    assert response.status_code == 200
+    created = response.json()
+    assert created["product_id_1"] == min(first.id, second.id)
+    assert created["product_id_2"] == max(first.id, second.id)
+    assert created["status"] == "Ожидает решения"
+    assert created["comment"] == "Проверить характеристики"
+    assert created["reviewed_at"] is None
+
+    duplicate = client.post(
+        "/commercial/products/duplicate-reviews",
+        json={
+            "product_id_1": first.id,
+            "product_id_2": second.id,
+        },
+    )
+    assert duplicate.status_code == 409
+
+    listing = client.get("/commercial/products/duplicate-reviews")
+    assert listing.status_code == 200
+    assert listing.json()["count"] >= 1
+    assert any(item["id"] == created["id"] for item in listing.json()["reviews"])
+
+    updated = client.put(
+        f"/commercial/products/duplicate-reviews/{created['id']}",
+        json={
+            "status": "Один товар",
+            "comment": "Это один и тот же товар",
+        },
+    )
+    assert updated.status_code == 200
+    result = updated.json()
+    assert result["status"] == "Один товар"
+    assert result["comment"] == "Это один и тот же товар"
+    assert result["reviewed_at"] is not None
+
+    db.refresh(
+        db.query(ProductDuplicateReviewDB)
+        .filter_by(id=created["id"])
+        .one()
+    )
+
+
+def test_product_duplicate_review_api_validates_input(client, db):
+    token = uuid.uuid4().hex
+    product = ProductDB(name=f"Товар проверки {token}")
+    db.add(product)
+    db.commit()
+    db.refresh(product)
+
+    same_product = client.post(
+        "/commercial/products/duplicate-reviews",
+        json={
+            "product_id_1": product.id,
+            "product_id_2": product.id,
+        },
+    )
+    assert same_product.status_code == 422
+
+    missing_product = client.post(
+        "/commercial/products/duplicate-reviews",
+        json={
+            "product_id_1": product.id,
+            "product_id_2": 999999999,
+        },
+    )
+    assert missing_product.status_code == 404
+
+    invalid_id = client.post(
+        "/commercial/products/duplicate-reviews",
+        json={
+            "product_id_1": True,
+            "product_id_2": product.id,
+        },
+    )
+    assert invalid_id.status_code == 422
+
+    invalid_status = client.put(
+        "/commercial/products/duplicate-reviews/999999999",
+        json={"status": "Автоматически объединить"},
+    )
+    assert invalid_status.status_code == 422
+
+    missing_review = client.put(
+        "/commercial/products/duplicate-reviews/999999999",
+        json={"status": "Один товар"},
+    )
+    assert missing_review.status_code == 404

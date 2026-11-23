@@ -478,3 +478,44 @@ class CommercialMatchDB(Base):
 
     created_at = Column(DateTime, nullable=True)
 
+
+
+class ProductDuplicateReviewDB(Base):
+    """Журнал ручной проверки потенциальных дублей товаров."""
+
+    __tablename__ = "product_duplicate_reviews"
+
+    __table_args__ = (
+        CheckConstraint(
+            "product_id_1 < product_id_2",
+            name="ck_product_duplicate_review_order",
+        ),
+        UniqueConstraint(
+            "product_id_1",
+            "product_id_2",
+            name="uq_product_duplicate_review_pair",
+        ),
+        Index("ix_product_duplicate_reviews_product_id_2", "product_id_2"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    product_id_1 = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    product_id_2 = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+
+    status = Column(
+        String(40),
+        nullable=False,
+        default="Ожидает решения",
+    )
+    comment = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+    reviewed_at = Column(DateTime, nullable=True)

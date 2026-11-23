@@ -50,6 +50,7 @@ from app.commercial.models import (
     CommercialAnalysisDB,
     CommercialMatchRunDB,
     CommercialMatchDB,
+    ProductDuplicateReviewDB,
 )
 
 from app.commercial.excel_importer import inspect_price_list
@@ -748,6 +749,184 @@ def get_commercial_product_duplicates(
         "count": len(groups),
         "groups": groups,
     }
+
+
+
+DUPLICATE_REVIEW_STATUSES = {
+    "Ожидает решения",
+    "Один товар",
+    "Разные товары",
+    "Требует уточнения",
+}
+
+
+def _duplicate_review_payload(db, review):
+    product_1 = db.get(ProductDB, review.product_id_1)
+    product_2 = db.get(ProductDB, review.product_id_2)
+
+    return {
+        "id": review.id,
+        "product_id_1": review.product_id_1,
+        "product_1_name": product_1.name if product_1 else None,
+        "product_id_2": review.product_id_2,
+        "product_2_name": product_2.name if product_2 else None,
+        "status": review.status,
+        "comment": review.comment,
+        "created_at": review.created_at,
+        "reviewed_at": review.reviewed_at,
+    }
+
+
+@app.get("/commercial/products/duplicate-reviews")
+def get_product_duplicate_reviews(db: Session = Depends(get_db)):
+    """Возвращает журнал ручной проверки дублей товаров."""
+
+    reviews = (
+        db.query(ProductDuplicateReviewDB)
+        .order_by(ProductDuplicateReviewDB.created_at.desc())
+        .all()
+    )
+
+    return {
+        "count": len(reviews),
+        "reviews": [
+            _duplicate_review_payload(db, review)
+            for review in reviews
+        ],
+    }
+
+
+@app.post("/commercial/products/duplicate-reviews")
+def create_product_duplicate_review(
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Создаёт запись ручной проверки пары товаров."""
+
+    if (
+        not isinstance(payload, dict)
+        or set(payload) - {"product_id_1", "product_id_2", "comment"}
+        or not {"product_id_1", "product_id_2"}.issubset(payload)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Ожидаются product_id_1, product_id_2 и необязательный comment",
+        )
+
+    first_id = payload["product_id_1"]
+    second_id = payload["product_id_2"]
+
+    for value in (first_id, second_id):
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise HTTPException(
+                status_code=422,
+                detail="ID товаров должны быть целыми числами",
+            )
+
+    if first_id <= 0 or second_id <= 0 or first_id == second_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Необходимо указать два разных положительных ID товаров",
+        )
+
+    comment = payload.get("comment")
+    if comment is not None and not isinstance(comment, str):
+        raise HTTPException(
+            status_code=422,
+            detail="comment должен быть строкой или null",
+        )
+
+    for product_id in (first_id, second_id):
+        if db.get(ProductDB, product_id) is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Товар каталога с ID {product_id} не найден",
+            )
+
+    product_id_1, product_id_2 = sorted((first_id, second_id))
+
+    existing = (
+        db.query(ProductDuplicateReviewDB)
+        .filter_by(
+            product_id_1=product_id_1,
+            product_id_2=product_id_2,
+        )
+        .first()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Проверка этой пары товаров уже существует",
+        )
+
+    review = ProductDuplicateReviewDB(
+        product_id_1=product_id_1,
+        product_id_2=product_id_2,
+        status="Ожидает решения",
+        comment=comment,
+    )
+    db.add(review)
+    db.commit()
+    db.refresh(review)
+
+    return _duplicate_review_payload(db, review)
+
+
+@app.put("/commercial/products/duplicate-reviews/{review_id}")
+def update_product_duplicate_review(
+    review_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Сохраняет решение по ручной проверке пары товаров."""
+
+    if (
+        not isinstance(payload, dict)
+        or not payload
+        or set(payload) - {"status", "comment"}
+        or "status" not in payload
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Ожидаются обязательный status и необязательный comment",
+        )
+
+    status = payload["status"]
+    if not isinstance(status, str) or status not in DUPLICATE_REVIEW_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail="Недопустимый статус проверки",
+        )
+
+    if "comment" in payload:
+        comment = payload["comment"]
+        if comment is not None and not isinstance(comment, str):
+            raise HTTPException(
+                status_code=422,
+                detail="comment должен быть строкой или null",
+            )
+    else:
+        comment = None
+
+    review = db.get(ProductDuplicateReviewDB, review_id)
+    if review is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Запись проверки дублей не найдена",
+        )
+
+    review.status = status
+    if "comment" in payload:
+        review.comment = comment
+    review.reviewed_at = (
+        None if status == "Ожидает решения" else datetime.now()
+    )
+
+    db.commit()
+    db.refresh(review)
+
+    return _duplicate_review_payload(db, review)
+
 
 @app.get("/commercial/imports/{import_id}/unmatched")
 def get_unmatched_import_rows(
@@ -1462,6 +1641,83 @@ def compare_match_supplier_offers(
     }
 
 
+
+
+@app.put("/commercial/analyses/{analysis_id}/matches/{match_id}/offer")
+def select_commercial_match_offer(
+    analysis_id: int,
+    match_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Сохраняет выбранное актуальное предложение для сопоставления."""
+
+    if not isinstance(payload, dict) or set(payload) != {"offer_id"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Ожидается только поле offer_id",
+        )
+
+    offer_id = payload.get("offer_id")
+    if not isinstance(offer_id, int) or isinstance(offer_id, bool):
+        raise HTTPException(
+            status_code=422,
+            detail="offer_id должен быть целым числом",
+        )
+
+    if db.get(CommercialAnalysisDB, analysis_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Коммерческий анализ не найден",
+        )
+
+    match = db.get(CommercialMatchDB, match_id)
+    if match is None or match.analysis_id != analysis_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Сопоставление не найдено для указанного анализа",
+        )
+
+    comparison = _match_offers_comparison_payload(db, match)
+    selected = next(
+        (
+            item
+            for item in comparison["ranked_offers"]
+            if item["id"] == offer_id
+        ),
+        None,
+    )
+
+    if selected is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Предложение нельзя выбрать: оно отсутствует среди "
+                "актуальных предложений, пригодных для расчёта"
+            ),
+        )
+
+    match.offer_id = offer_id
+    match.estimated_unit_price = selected["normalized_unit_price"]
+    match.estimated_total_price = selected["landed_total"]
+    match.currency = "RUB"
+
+    db.commit()
+    db.refresh(match)
+
+    return {
+        "analysis_id": analysis_id,
+        "match_id": match.id,
+        "offer_id": match.offer_id,
+        "supplier_name": selected["supplier_name"],
+        "estimated_quantity": match.estimated_quantity,
+        "estimated_unit_price": match.estimated_unit_price,
+        "estimated_total_price": match.estimated_total_price,
+        "currency": match.currency,
+        "verification_status": selected["verification_status"],
+        "freshness_status": selected["freshness_status"],
+        "freshness_warning": selected["freshness_warning"],
+    }
 
 
 @app.get("/commercial/products/{product_id}/suppliers/{supplier_id}/price-history")

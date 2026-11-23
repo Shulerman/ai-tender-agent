@@ -27,6 +27,7 @@ from app.commercial.models import (
     SupplierOfferVerificationDB,
     SupplierProductMappingDB,
     ProductUnitConversionDB,
+    ProductDuplicateReviewDB,
     CommercialAnalysisDB,
     CommercialMatchRunDB,
     CommercialMatchDB,
