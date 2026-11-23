@@ -1266,3 +1266,54 @@ def test_product_duplicate_review_api_validates_input(client, db):
         json={"status": "Один товар"},
     )
     assert missing_review.status_code == 404
+
+
+def test_product_duplicate_review_api_lifecycle(client, db):
+    token = uuid.uuid4().hex
+    first = ProductDB(name=f"Товар A {token}")
+    second = ProductDB(name=f"Товар B {token}")
+    db.add_all([first, second])
+    db.commit()
+    db.refresh(first)
+    db.refresh(second)
+
+    created = client.post(
+        "/commercial/products/duplicate-reviews",
+        json={
+            "product_id_1": first.id,
+            "product_id_2": second.id,
+            "comment": "Первичная проверка",
+        },
+    )
+    assert created.status_code == 200
+    review_id = created.json()["id"]
+    assert created.json()["reviewed_at"] is None
+
+    decided = client.put(
+        f"/commercial/products/duplicate-reviews/{review_id}",
+        json={"status": "Один товар", "comment": "Подтверждено"},
+    )
+    assert decided.status_code == 200
+    assert decided.json()["reviewed_at"] is not None
+    assert decided.json()["comment"] == "Подтверждено"
+
+    changed = client.put(
+        f"/commercial/products/duplicate-reviews/{review_id}",
+        json={"status": "Разные товары"},
+    )
+    assert changed.status_code == 200
+    assert changed.json()["reviewed_at"] is not None
+    assert changed.json()["comment"] == "Подтверждено"
+
+    reopened = client.put(
+        f"/commercial/products/duplicate-reviews/{review_id}",
+        json={"status": "Ожидает решения", "comment": None},
+    )
+    assert reopened.status_code == 200
+    assert reopened.json()["reviewed_at"] is None
+    assert reopened.json()["comment"] is None
+
+    db.refresh(first)
+    db.refresh(second)
+    assert first.name == f"Товар A {token}"
+    assert second.name == f"Товар B {token}"
