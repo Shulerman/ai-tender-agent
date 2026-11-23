@@ -1262,6 +1262,11 @@ def get_commercial_analysis_matches(
 
     for match in matches:
         item = _matcher_result_payload(db, match)
+        item["offers_comparison"] = _match_offers_comparison_payload(
+            db,
+            match,
+            unavailable_as_status=True,
+        )
         if match.match_status == "Полное соответствие":
             full_matches.append(item)
         elif match.match_status == "Потенциальный аналог":
@@ -1275,37 +1280,32 @@ def get_commercial_analysis_matches(
     }
 
 
-
-
-
-@app.get("/commercial/analyses/{analysis_id}/matches/{match_id}/offers/compare")
-def compare_match_supplier_offers(
-    analysis_id: int,
-    match_id: int,
-    db: Session = Depends(get_db),
+def _match_offers_comparison_payload(
+    db,
+    match,
+    unavailable_as_status=False,
 ):
-    """Сравнивает предложения по количеству из требования тендера."""
+    """Формирует единый результат сравнения предложений для сопоставления."""
 
-    if db.get(CommercialAnalysisDB, analysis_id) is None:
-        raise HTTPException(status_code=404, detail="Коммерческий анализ не найден")
+    def unavailable(reason):
+        if not unavailable_as_status:
+            raise HTTPException(status_code=422, detail=reason)
 
-    match = db.get(CommercialMatchDB, match_id)
-    if match is None or match.analysis_id != analysis_id:
-        raise HTTPException(
-            status_code=404,
-            detail="Сопоставление не найдено для указанного анализа",
-        )
+        return {
+            "status": "unavailable",
+            "reason": reason,
+            "ranked_offers": [],
+            "unranked_offers": [],
+            "expired_offers": [],
+            "expired_unranked_offers": [],
+        }
 
     if match.product_id is None:
-        raise HTTPException(
-            status_code=422,
-            detail="Для сопоставления не выбран товар каталога",
-        )
+        return unavailable("Для сопоставления не выбран товар каталога")
 
     if match.estimated_quantity is None:
-        raise HTTPException(
-            status_code=422,
-            detail="Нельзя сравнить предложения: количество не определено достоверно",
+        return unavailable(
+            "Нельзя сравнить предложения: количество не определено достоверно"
         )
 
     try:
@@ -1315,7 +1315,7 @@ def compare_match_supplier_offers(
             required_quantity=match.estimated_quantity,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        return unavailable(str(exc))
 
     def serialize_item(item, include_totals=False):
         offer = item["offer"]
@@ -1339,19 +1339,16 @@ def compare_match_supplier_offers(
             "source_reference": offer.source_reference,
             "verification_status": offer.verification_status,
             "notes": offer.notes,
+            "supplier_name": supplier.name if supplier else None,
+            "freshness_status": item.get("freshness_status"),
+            "freshness_warning": item.get("freshness_warning"),
         }
-        result["supplier_name"] = supplier.name if supplier else None
-        result["freshness_status"] = item.get("freshness_status")
-        result["freshness_warning"] = item.get("freshness_warning")
 
         if include_totals:
             for field in (
                 "normalized_unit_price",
                 "goods_total",
-                "delivery_cost",
                 "landed_total",
-                "verification_status",
-                "available_quantity",
             ):
                 result[field] = item.get(field)
         elif item.get("reason") is not None:
@@ -1360,16 +1357,15 @@ def compare_match_supplier_offers(
         return result
 
     return {
-        "analysis_id": analysis_id,
-        "match_id": match_id,
-        "product_id": match.product_id,
-        "estimated_quantity": match.estimated_quantity,
+        "status": "available",
+        "reason": None,
         "ranked_offers": [
             serialize_item(item, include_totals=True)
             for item in comparison["ranked_offers"]
         ],
         "unranked_offers": [
-            serialize_item(item) for item in comparison["unranked_offers"]
+            serialize_item(item)
+            for item in comparison["unranked_offers"]
         ],
         "expired_offers": [
             serialize_item(item, include_totals=True)
@@ -1380,6 +1376,37 @@ def compare_match_supplier_offers(
             for item in comparison["expired_unranked_offers"]
         ],
     }
+
+
+@app.get("/commercial/analyses/{analysis_id}/matches/{match_id}/offers/compare")
+def compare_match_supplier_offers(
+    analysis_id: int,
+    match_id: int,
+    db: Session = Depends(get_db),
+):
+    """Сравнивает предложения по количеству из требования тендера."""
+
+    if db.get(CommercialAnalysisDB, analysis_id) is None:
+        raise HTTPException(status_code=404, detail="Коммерческий анализ не найден")
+
+    match = db.get(CommercialMatchDB, match_id)
+    if match is None or match.analysis_id != analysis_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Сопоставление не найдено для указанного анализа",
+        )
+
+    comparison = _match_offers_comparison_payload(db, match)
+
+    return {
+        "analysis_id": analysis_id,
+        "match_id": match_id,
+        "product_id": match.product_id,
+        "estimated_quantity": match.estimated_quantity,
+        **comparison,
+    }
+
+
 
 
 @app.get("/commercial/offers")
