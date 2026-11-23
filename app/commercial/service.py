@@ -2,6 +2,9 @@ import json
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
+from app.ai.technical_models import ProductAnalysis, NOT_SPECIFIED
+from app.commercial.quantity_parser import parse_product_quantity
+
 from sqlalchemy.orm import Session
 
 from app.database import TenderDB
@@ -994,6 +997,29 @@ def run_commercial_matcher(
             if not isinstance(required_attributes, list):
                 required_attributes = []
 
+            raw_quantity = attributes.get("quantity")
+            if isinstance(raw_quantity, bool):
+                raw_quantity = NOT_SPECIFIED
+            elif isinstance(raw_quantity, (int, float, Decimal)):
+                raw_quantity = str(raw_quantity)
+            elif not isinstance(raw_quantity, str):
+                raw_quantity = NOT_SPECIFIED
+
+            quantity_analysis = ProductAnalysis(
+                name=(
+                    attributes.get("name")
+                    if isinstance(attributes.get("name"), str)
+                    else requirement.requirement_text or "Товар"
+                ),
+                quantity=raw_quantity,
+                unit=(
+                    attributes.get("unit")
+                    if isinstance(attributes.get("unit"), str)
+                    else NOT_SPECIFIED
+                ),
+            )
+            quantity_result = parse_product_quantity(quantity_analysis)
+
             for product in products:
                 statistics["products_checked"] += 1
 
@@ -1026,6 +1052,12 @@ def run_commercial_matcher(
                     "source_chunk_id": requirement.source_chunk_id,
                     "extraction_status": requirement.extraction_status,
                     "requirement_attribute_evidence": requirement_evidence,
+                    "quantity_analysis": {
+                        "source_quantity": quantity_result["source_quantity"],
+                        "source_unit": quantity_result["source_unit"],
+                        "parse_status": quantity_result["parse_status"],
+                        "parse_reason": quantity_result["parse_reason"],
+                    },
                     "evidence_note": (
                         "Цитаты подтверждают требования тендера, "
                         "но не являются доказательствами характеристик "
@@ -1038,6 +1070,7 @@ def run_commercial_matcher(
                     tender_requirement_id=requirement.id,
                     match_run_id=run.id,
                     product_id=product.id,
+                    estimated_quantity=quantity_result["estimated_quantity"],
                     tender_requirement=requirement.requirement_text,
                     match_status=result["match_status"],
                     match_score=result["match_score"],

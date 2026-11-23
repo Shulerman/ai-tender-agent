@@ -62,6 +62,7 @@ from app.commercial.service import (
     get_current_supplier_offers,
     verify_supplier_offer,
     run_commercial_matcher,
+    compare_supplier_offers,
 )
 
 
@@ -1273,6 +1274,112 @@ def get_commercial_analysis_matches(
         "potential_analogues": potential_analogues,
     }
 
+
+
+
+
+@app.get("/commercial/analyses/{analysis_id}/matches/{match_id}/offers/compare")
+def compare_match_supplier_offers(
+    analysis_id: int,
+    match_id: int,
+    db: Session = Depends(get_db),
+):
+    """Сравнивает предложения по количеству из требования тендера."""
+
+    if db.get(CommercialAnalysisDB, analysis_id) is None:
+        raise HTTPException(status_code=404, detail="Коммерческий анализ не найден")
+
+    match = db.get(CommercialMatchDB, match_id)
+    if match is None or match.analysis_id != analysis_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Сопоставление не найдено для указанного анализа",
+        )
+
+    if match.product_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Для сопоставления не выбран товар каталога",
+        )
+
+    if match.estimated_quantity is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Нельзя сравнить предложения: количество не определено достоверно",
+        )
+
+    try:
+        comparison = compare_supplier_offers(
+            db=db,
+            product_id=match.product_id,
+            required_quantity=match.estimated_quantity,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    def serialize_item(item, include_totals=False):
+        offer = item["offer"]
+        supplier = item.get("supplier")
+        result = {
+            "id": offer.id,
+            "supplier_id": offer.supplier_id,
+            "import_id": offer.import_id,
+            "product_id": offer.product_id,
+            "price": offer.price,
+            "currency": offer.currency,
+            "unit": offer.unit,
+            "available_quantity": offer.available_quantity,
+            "availability_status": offer.availability_status,
+            "delivery_time_days": offer.delivery_time_days,
+            "payment_terms": offer.payment_terms,
+            "delivery_cost": offer.delivery_cost,
+            "received_at": offer.received_at,
+            "valid_until": offer.valid_until,
+            "source_type": offer.source_type,
+            "source_reference": offer.source_reference,
+            "verification_status": offer.verification_status,
+            "notes": offer.notes,
+        }
+        result["supplier_name"] = supplier.name if supplier else None
+        result["freshness_status"] = item.get("freshness_status")
+        result["freshness_warning"] = item.get("freshness_warning")
+
+        if include_totals:
+            for field in (
+                "normalized_unit_price",
+                "goods_total",
+                "delivery_cost",
+                "landed_total",
+                "verification_status",
+                "available_quantity",
+            ):
+                result[field] = item.get(field)
+        elif item.get("reason") is not None:
+            result["reason"] = item["reason"]
+
+        return result
+
+    return {
+        "analysis_id": analysis_id,
+        "match_id": match_id,
+        "product_id": match.product_id,
+        "estimated_quantity": match.estimated_quantity,
+        "ranked_offers": [
+            serialize_item(item, include_totals=True)
+            for item in comparison["ranked_offers"]
+        ],
+        "unranked_offers": [
+            serialize_item(item) for item in comparison["unranked_offers"]
+        ],
+        "expired_offers": [
+            serialize_item(item, include_totals=True)
+            for item in comparison["expired_offers"]
+        ],
+        "expired_unranked_offers": [
+            serialize_item(item)
+            for item in comparison["expired_unranked_offers"]
+        ],
+    }
 
 
 @app.get("/commercial/offers")

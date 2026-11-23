@@ -83,7 +83,12 @@ def create_test_analysis(db):
     )
 
 
-def create_test_requirement(db, tender):
+def create_test_requirement(
+    db,
+    tender,
+    quantity="Не указано",
+    unit="шт.",
+):
     """Создаёт документ, анализ и требование для тестового тендера."""
 
     document = TenderDocumentDB(
@@ -109,6 +114,8 @@ def create_test_requirement(db, tender):
 
     requirement_attributes = {
         "name": "Тестовый товар",
+        "quantity": quantity,
+        "unit": unit,
         "attributes": [
             {
                 "name": "diameter",
@@ -1663,6 +1670,64 @@ def test_compare_supplier_offers_excludes_rejected_and_insufficient_quantity(
     assert unranked["reason"] == "Недостаточно товара у поставщика"
 
 
+@pytest.mark.parametrize(
+    ("quantity", "expected_quantity", "expected_status"),
+    [
+        ("100", Decimal("100"), "parsed"),
+        ("по заявкам", None, "missing"),
+        ("от 100 до 200", None, "ambiguous"),
+    ],
+)
+def test_run_commercial_matcher_parses_requirement_quantity(
+    db,
+    test_id,
+    quantity,
+    expected_quantity,
+    expected_status,
+):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, requirement = create_test_requirement(
+        db,
+        tender,
+        quantity=quantity,
+        unit="шт.",
+    )
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар для проверки количества-{test_id}",
+            "technical_attributes": {
+                "diameter": {"value": 10, "unit": "mm"},
+                "material": "steel",
+            },
+        },
+    )
+
+    run = run_commercial_matcher(
+        db,
+        analysis.id,
+        tender_analysis.id,
+    )
+
+    match = db.query(CommercialMatchDB).filter_by(
+        match_run_id=run.id,
+        product_id=product.id,
+    ).one()
+
+    evidence = json.loads(match.evidence_references)
+    quantity_analysis = evidence["quantity_analysis"]
+
+    assert match.estimated_quantity == expected_quantity
+    assert quantity_analysis["source_quantity"] == quantity
+    assert quantity_analysis["source_unit"] == "шт."
+    assert quantity_analysis["parse_status"] == expected_status
+    assert quantity_analysis["parse_reason"]
+
+
 def test_run_commercial_matcher_creates_full_match_and_preserves_evidence(
     db,
     test_id,
@@ -1802,3 +1867,80 @@ def test_run_commercial_matcher_does_not_create_match_without_confirmed_data(
     # Остальные товары каталога могут иметь собственные совпадения.
     assert run.statistics["products_checked"] >= 1
     assert run.statistics["insufficient_data"] >= 1
+
+
+def test_run_commercial_matcher_saves_parsed_quantity(db, test_id):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, requirement = create_test_requirement(db, tender)
+
+    requirement_attributes = dict(requirement.attributes)
+    requirement_attributes.update({"quantity": 25, "unit": "шт"})
+    requirement.attributes = requirement_attributes
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар с распознанным количеством-{test_id}",
+            "technical_attributes": {
+                "diameter": {"value": 10, "unit": "mm"},
+                "material": "steel",
+            },
+        },
+    )
+    db.commit()
+
+    run = run_commercial_matcher(db, analysis.id, tender_analysis.id)
+    match = db.query(CommercialMatchDB).filter_by(
+        match_run_id=run.id,
+        product_id=product.id,
+    ).one()
+
+    evidence = json.loads(match.evidence_references)
+    assert match.estimated_quantity == Decimal("25")
+    assert evidence["quantity_analysis"]["parse_status"] == "parsed"
+    assert evidence["quantity_analysis"]["source_quantity"] == "25"
+    assert evidence["quantity_analysis"]["source_unit"] == "шт"
+
+
+def test_run_commercial_matcher_does_not_estimate_ambiguous_quantity(
+    db,
+    test_id,
+):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, requirement = create_test_requirement(db, tender)
+
+    requirement_attributes = dict(requirement.attributes)
+    requirement_attributes.update({
+        "quantity": "от 10 до 20",
+        "unit": "шт",
+    })
+    requirement.attributes = requirement_attributes
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар с диапазоном количества-{test_id}",
+            "technical_attributes": {
+                "diameter": {"value": 10, "unit": "mm"},
+                "material": "steel",
+            },
+        },
+    )
+    db.commit()
+
+    run = run_commercial_matcher(db, analysis.id, tender_analysis.id)
+    match = db.query(CommercialMatchDB).filter_by(
+        match_run_id=run.id,
+        product_id=product.id,
+    ).one()
+
+    evidence = json.loads(match.evidence_references)
+    assert match.estimated_quantity is None
+    assert evidence["quantity_analysis"]["parse_status"] == "ambiguous"
+    assert evidence["quantity_analysis"]["source_quantity"] == "от 10 до 20"

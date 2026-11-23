@@ -16,6 +16,8 @@ from app.commercial.models import (
     CommercialMatchRunDB,
     CommercialMatchDB,
     ProductDB,
+    SupplierDB,
+    SupplierOfferDB,
 )
 from app.commercial.service import create_commercial_analysis
 
@@ -329,3 +331,112 @@ def test_matcher_api_returns_404_for_unknown_analysis(client):
     assert client.get(
         "/commercial/analyses/999999/matches"
     ).status_code == 404
+
+def test_compare_offers_api_returns_ranked_offers(client, db):
+    _, analysis, _, _ = create_scenario(db)
+
+    product = ProductDB(
+        name=f"Тестовый товар сравнения {uuid.uuid4().hex}",
+        unit="шт.",
+    )
+    supplier = SupplierDB(name=f"Тестовый поставщик {uuid.uuid4().hex}")
+    db.add_all([product, supplier])
+    db.flush()
+
+    match = CommercialMatchDB(
+        analysis_id=analysis.id,
+        product_id=product.id,
+        tender_requirement="10 штук",
+        match_status="Полное соответствие",
+        estimated_quantity=10,
+    )
+    db.add(match)
+    db.flush()
+
+    offer = SupplierOfferDB(
+        supplier_id=supplier.id,
+        product_id=product.id,
+        price=150,
+        unit="шт.",
+        available_quantity=100,
+        delivery_cost=0,
+        received_at=datetime.now(),
+        valid_until=datetime.now() + timedelta(days=5),
+        source_type="manual",
+        verification_status="Подтверждено",
+    )
+    db.add(offer)
+    db.commit()
+    db.refresh(match)
+
+    response = client.get(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offers/compare"
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["analysis_id"] == analysis.id
+    assert result["match_id"] == match.id
+    assert result["product_id"] == product.id
+    assert float(result["estimated_quantity"]) == 10
+    assert len(result["ranked_offers"]) == 1
+    assert result["ranked_offers"][0]["supplier_name"] == supplier.name
+    assert float(result["ranked_offers"][0]["landed_total"]) == 1500
+    assert result["unranked_offers"] == []
+    assert result["expired_offers"] == []
+
+
+def test_compare_offers_api_rejects_missing_estimated_quantity(client, db):
+    _, analysis, _, _ = create_scenario(db)
+
+    product = ProductDB(
+        name=f"Товар без количества {uuid.uuid4().hex}",
+        unit="шт.",
+    )
+    db.add(product)
+    db.flush()
+
+    match = CommercialMatchDB(
+        analysis_id=analysis.id,
+        product_id=product.id,
+        tender_requirement="Количество не указано",
+        match_status="Полное соответствие",
+        estimated_quantity=None,
+    )
+    db.add(match)
+    db.commit()
+
+    response = client.get(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offers/compare"
+    )
+
+    assert response.status_code == 422
+    assert "количество не определено" in response.json()["detail"]
+
+
+def test_compare_offers_api_rejects_match_from_another_analysis(client, db):
+    _, analysis, _, _ = create_scenario(db)
+    _, other_analysis, _, _ = create_scenario(db)
+
+    product = ProductDB(
+        name=f"Чужой товар {uuid.uuid4().hex}",
+        unit="шт.",
+    )
+    db.add(product)
+    db.flush()
+
+    match = CommercialMatchDB(
+        analysis_id=other_analysis.id,
+        product_id=product.id,
+        tender_requirement="10 штук",
+        match_status="Полное соответствие",
+        estimated_quantity=10,
+    )
+    db.add(match)
+    db.commit()
+
+    response = client.get(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offers/compare"
+    )
+
+    assert response.status_code == 404
