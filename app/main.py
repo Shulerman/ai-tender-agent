@@ -20,11 +20,7 @@ from app.tenders.models import Tender
 from app.database import SessionLocal, TenderDB
 
 from app.documents.storage import save_document
-from app.documents.pdf_reader import extract_text_from_pdf
-from app.documents.docx_reader import extract_text_from_docx
-from app.documents.doc_reader import extract_text_from_doc
-from app.documents.html_reader import extract_text_from_html
-from app.documents.extraction_service import extract_document_blocks
+from app.documents.extraction_service import extract_document_content
 from app.documents.persistence_service import save_document_with_chunks
 from app.documents.models import (
     TenderDocumentDB,
@@ -157,24 +153,9 @@ async def upload_document(
         document = await save_document(file)
 
         extension = document["detected_extension"]
-        file_path = document["file_path"]
-
-        if extension == ".pdf":
-            extracted_text = extract_text_from_pdf(file_path)
-
-        elif extension == ".docx":
-            extracted_text = extract_text_from_docx(file_path)
-
-        elif extension == ".doc":
-            extracted_text = extract_text_from_doc(file_path)
-
-        elif extension == ".html":
-            extracted_text = extract_text_from_html(file_path)
-
-        else:
-            raise ValueError("Неподдерживаемый формат документа")
-
-        blocks = extract_document_blocks(file_path)
+        extracted = extract_document_content(document["file_path"])
+        extracted_text = extracted["text"]
+        blocks = extracted["blocks"]
 
         document_record = save_document_with_chunks(
             db=db,

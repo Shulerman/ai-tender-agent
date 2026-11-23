@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 
 $previousEnvironment = @{
     DATABASE_URL = $env:DATABASE_URL
@@ -30,7 +30,7 @@ try {
     }
 
     Write-Host "`n===== RUNNING REGRESSION TESTS =====" -ForegroundColor Cyan
-    python -m pytest -v
+    python -m pytest -q
     if ($LASTEXITCODE -ne 0) {
         throw "Regression tests failed."
     }

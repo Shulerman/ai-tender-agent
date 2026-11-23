@@ -86,8 +86,9 @@ def extract_text_from_html(file_path: str) -> str:
 
 
 
+
 class DocumentHTMLBlockParser(HTMLParser):
-    """Извлекает HTML-блоки с сохранением порядка и типа."""
+    """Извлекает HTML-блоки в исходном порядке с координатами таблиц."""
 
     BLOCK_TAGS = {
         "p": "paragraph",
@@ -107,8 +108,12 @@ class DocumentHTMLBlockParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.blocks = []
         self.stack = []
-        self.skip_depth = 0
         self.fallback_parts = []
+        self.in_head = False
+        self.skip_stack = []
+        self.table_counter = 0
+        self.table_stack = []
+        self.table_rows = {}
 
     def _flush_fallback(self):
         text = " ".join(" ".join(self.fallback_parts).split())
@@ -119,58 +124,119 @@ class DocumentHTMLBlockParser(HTMLParser):
             })
         self.fallback_parts = []
 
+    def _emit_frame(self, frame):
+        text = " ".join(" ".join(frame["text"]).split())
+        if text:
+            block = {
+                "locator_type": frame["type"],
+                "text": text,
+            }
+            if frame.get("locator_value"):
+                block["locator_value"] = frame["locator_value"]
+            self.blocks.append(block)
+
+    def _close_frame_at(self, index):
+        # Закрываем также незакрытые внутренние блоки сверху вниз.
+        while len(self.stack) > index:
+            self._emit_frame(self.stack.pop())
+
+    def _close_open_paragraph(self):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index]["tag"] == "p":
+                self._close_frame_at(index)
+                return
+
     def handle_starttag(self, tag, attrs):
+        if tag == "head":
+            self.in_head = True
+            return
+
+        if self.in_head:
+            return
+
+        if self.skip_stack:
+            if tag in self.SKIP_TAGS:
+                self.skip_stack.append(tag)
+            return
+
         if tag in self.SKIP_TAGS:
-            self.skip_depth += 1
+            self.skip_stack.append(tag)
             return
 
-        if self.skip_depth:
+        if tag == "table":
+            if any(frame["tag"] == "p" for frame in self.stack):
+                self._close_open_paragraph()
+            self.table_counter += 1
+            self.table_stack.append(self.table_counter)
+            self.table_rows[self.table_counter] = 0
             return
 
-        if tag in {"td", "th"} and self.stack:
+        if tag == "p":
+            self._close_open_paragraph()
+
+        if tag in {"td", "th"}:
             for frame in reversed(self.stack):
                 if frame["tag"] == "tr":
                     if frame["text"]:
-                        frame["text"].append("|")
+                        frame["text"].append(" | ")
                     break
+            return
 
         if tag in self.BLOCK_TAGS:
             self._flush_fallback()
-            self.stack.append({
+            frame = {
                 "tag": tag,
                 "type": self.BLOCK_TAGS[tag],
                 "text": [],
-            })
+            }
+
+            if tag == "tr":
+                table_number = (
+                    self.table_stack[-1]
+                    if self.table_stack
+                    else self.table_counter + 1
+                )
+                self.table_rows[table_number] = (
+                    self.table_rows.get(table_number, 0) + 1
+                )
+                frame["locator_value"] = (
+                    f"table={table_number};row={self.table_rows[table_number]}"
+                )
+
+            self.stack.append(frame)
 
     def handle_startendtag(self, tag, attrs):
         self.handle_starttag(tag, attrs)
         self.handle_endtag(tag)
 
     def handle_endtag(self, tag):
-        if tag in self.SKIP_TAGS and self.skip_depth:
-            self.skip_depth -= 1
+        if tag == "head":
+            self.in_head = False
             return
 
-        if self.skip_depth:
+        if self.in_head:
+            return
+
+        if self.skip_stack:
+            if tag == self.skip_stack[-1]:
+                self.skip_stack.pop()
+            return
+
+        if tag == "table":
+            if self.table_stack:
+                self.table_stack.pop()
             return
 
         for index in range(len(self.stack) - 1, -1, -1):
             if self.stack[index]["tag"] == tag:
-                frame = self.stack.pop(index)
-                text = " ".join(" ".join(frame["text"]).split())
-
-                if text:
-                    self.blocks.append({
-                        "locator_type": frame["type"],
-                        "text": text,
-                    })
+                self._close_frame_at(index)
                 break
 
         if tag in self.BLOCK_TAGS:
             self._flush_fallback()
 
     def handle_data(self, data):
-        if self.skip_depth:
+        if self.in_head or self.skip_stack:
             return
 
         text = data.strip()
@@ -178,19 +244,14 @@ class DocumentHTMLBlockParser(HTMLParser):
             return
 
         if self.stack:
+            # Текст относится к ближайшему открытому блоку.
             self.stack[-1]["text"].append(text)
         else:
             self.fallback_parts.append(text)
 
     def get_blocks(self):
         while self.stack:
-            frame = self.stack.pop()
-            text = " ".join(" ".join(frame["text"]).split())
-            if text:
-                self.blocks.append({
-                    "locator_type": frame["type"],
-                    "text": text,
-                })
+            self._emit_frame(self.stack.pop())
 
         self._flush_fallback()
 
@@ -203,12 +264,13 @@ class DocumentHTMLBlockParser(HTMLParser):
 
             result.append({
                 "locator_type": locator_type,
-                "locator_value": str(counters[locator_type]),
+                "locator_value": block.get(
+                    "locator_value", str(counters[locator_type])
+                ),
                 "text": block["text"],
             })
 
         return result
-
 
 def extract_blocks_from_html(file_path: str) -> list[dict]:
     """Извлекает HTML-блоки с сохранением типа и порядкового номера."""

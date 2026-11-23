@@ -14,3 +14,7 @@ python-docx
 openpyxl
 pytest
 alembic==1.20.1
+
+pdfplumber>=0.11,<0.12
+camelot-py==2.2.0
+pypdfium2==5.15.2
