@@ -68,4 +68,8 @@ jobs:
       - name: Run PDF table reconstruction regression
         run: python -m pytest -q tests/test_pdf_table_reconstruction.py
       - name: Run full analysis and Gemini configuration regression
+        env:
+          DATABASE_URL: sqlite:///./ci_test.db
+          POSTGRES_PASSWORD: ci-test-only
+          PYTHONPATH: .
         run: python -m pytest -q tests/test_gemini_client.py tests/test_full_tender_analysis_api.py
