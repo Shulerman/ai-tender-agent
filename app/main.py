@@ -31,6 +31,7 @@ from app.documents.analysis_service import (
     analyze_and_save_document_requirements,
 )
 
+from app.ai.gemini import is_gemini_enabled
 from app.ai.technical_analyst import analyze_technical_requirements
 from app.ai.legal_analyst import analyze_legal_requirements
 from app.ai.full_analyst import analyze_full_tender
@@ -1391,6 +1392,109 @@ def run_commercial_matcher_endpoint(
     db: Session = Depends(get_db),
 ):
     return _run_commercial_matcher_api(analysis_id, payload, db)
+
+
+@app.post("/documents/{document_id}/full-analysis")
+async def run_full_document_analysis(
+    document_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Выполняет технический анализ документа и коммерческий подбор."""
+
+    if not isinstance(payload, dict) or set(payload) != {"commercial_analysis_id"}:
+        raise HTTPException(
+            status_code=422,
+            detail="Ожидается только поле commercial_analysis_id",
+        )
+
+    commercial_analysis_id = payload.get("commercial_analysis_id")
+
+    if (
+        isinstance(commercial_analysis_id, bool)
+        or not isinstance(commercial_analysis_id, int)
+        or commercial_analysis_id <= 0
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="commercial_analysis_id должен быть положительным целым числом",
+        )
+
+    if not is_gemini_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Gemini отключён. Установите GEMINI_ENABLED=true.",
+        )
+
+    document = db.get(TenderDocumentDB, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Документ не найден")
+
+    commercial_analysis = db.get(
+        CommercialAnalysisDB,
+        commercial_analysis_id,
+    )
+    if commercial_analysis is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Коммерческий анализ не найден",
+        )
+
+    tender = db.query(TenderDB).filter(
+        TenderDB.tender_id == commercial_analysis.tender_id
+    ).first()
+
+    if tender is None or document.tender_id != tender.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Документ относится к другому тендеру",
+        )
+
+    try:
+        technical_result = await analyze_and_save_document_requirements(
+            db=db,
+            document_id=document_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        status_code = (
+            404 if message == "Документ не найден"
+            else 400 if message in {
+                "У документа нет текстовых фрагментов",
+                "Текст документа пуст",
+            }
+            else 422
+        )
+        raise HTTPException(status_code=status_code, detail=message)
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Ошибка технического анализа документа",
+        )
+
+    technical_analysis_id = technical_result.get("analysis_id")
+
+    if (
+        technical_result.get("status") != "Завершён"
+        or isinstance(technical_analysis_id, bool)
+        or not isinstance(technical_analysis_id, int)
+        or technical_analysis_id <= 0
+    ):
+        raise HTTPException(
+            status_code=502,
+            detail="Технический анализ не вернул завершённый результат",
+        )
+
+    matcher_result = _run_commercial_matcher_api(
+        analysis_id=commercial_analysis_id,
+        payload={"tender_analysis_id": technical_analysis_id},
+        db=db,
+    )
+
+    return {
+        "document_analysis": technical_result,
+        "commercial_match_run": matcher_result,
+    }
 
 
 @app.get("/commercial/analyses/{analysis_id}/match-runs")

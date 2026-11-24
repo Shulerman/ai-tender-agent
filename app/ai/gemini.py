@@ -2,6 +2,19 @@
 import asyncio
 import httpx
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+
+def is_gemini_enabled() -> bool:
+    """Проверяет глобальное разрешение на передачу данных в Gemini."""
+
+    value = os.getenv("GEMINI_ENABLED", "false").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 
 GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
@@ -16,6 +29,12 @@ GEMINI_URL = (
 
 async def generate_text(prompt: str, json_mode: bool = False) -> str:
     """Отправляет запрос в Gemini с повторными попытками."""
+
+    if not is_gemini_enabled():
+        raise RuntimeError(
+            "Gemini отключён. Установите GEMINI_ENABLED=true "
+            "в настройках окружения."
+        )
 
     api_key = os.getenv("GEMINI_API_KEY")
 
