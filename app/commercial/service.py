@@ -991,7 +991,7 @@ def run_commercial_matcher(
         for requirement in requirements:
             attributes = requirement.attributes
             if not isinstance(attributes, dict):
-                continue
+                attributes = {}
 
             required_attributes = attributes.get("attributes", [])
             if not isinstance(required_attributes, list):
@@ -1086,9 +1086,7 @@ def run_commercial_matcher(
                         result["discrepancies"],
                         ensure_ascii=False,
                     ),
-                    evidence_status=(
-                        requirement.extraction_status or "Не проверено"
-                    ),
+                    evidence_status="Не проверено",
                     evidence_references=json.dumps(
                         evidence_references,
                         ensure_ascii=False,
@@ -1121,17 +1119,26 @@ def run_commercial_matcher(
     except Exception as error:
         db.rollback()
 
-        failed_run = CommercialMatchRunDB(
-            commercial_analysis_id=analysis_id,
-            tender_analysis_id=tender_analysis_id,
-            status="Ошибка",
-            algorithm_version=ALGORITHM_VERSION,
-            started_at=run.started_at,
-            completed_at=datetime.now(),
-            error=str(error),
-        )
-        db.add(failed_run)
-        db.commit()
+        try:
+            failed_run = CommercialMatchRunDB(
+                commercial_analysis_id=analysis_id,
+                tender_analysis_id=tender_analysis_id,
+                status="Ошибка",
+                algorithm_version=ALGORITHM_VERSION,
+                started_at=run.started_at,
+                completed_at=datetime.now(),
+                error=str(error),
+            )
+            db.add(failed_run)
+            db.commit()
+        except Exception as persistence_error:
+            db.rollback()
+            if hasattr(error, "add_note"):
+                error.add_note(
+                    "Не удалось сохранить запись о неудачном запуске Matcher: "
+                    f"{persistence_error}"
+                )
+
         raise
 
 def compare_supplier_offers(

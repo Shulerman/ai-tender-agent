@@ -1670,6 +1670,51 @@ def test_compare_supplier_offers_excludes_rejected_and_insufficient_quantity(
     assert unranked["reason"] == "Недостаточно товара у поставщика"
 
 
+def test_run_commercial_matcher_counts_invalid_requirement_attributes(
+    db,
+    test_id,
+):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, requirement = create_test_requirement(db, tender)
+
+    requirement.attributes = None
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар для некорректного требования-{test_id}",
+            "technical_attributes": {
+                "diameter": {"value": 10, "unit": "mm"},
+                "material": "steel",
+            },
+        },
+    )
+    db.commit()
+
+    catalog_size = db.query(type(product)).count()
+
+    run = run_commercial_matcher(
+        db,
+        analysis.id,
+        tender_analysis.id,
+    )
+
+    matches = db.query(CommercialMatchDB).filter_by(
+        match_run_id=run.id,
+        tender_requirement_id=requirement.id,
+    ).all()
+
+    assert run.status == "Завершён"
+    assert run.statistics["requirements_total"] == 1
+    assert run.statistics["products_checked"] == catalog_size
+    assert run.statistics["insufficient_data"] == catalog_size
+    assert run.statistics["matches_created"] == 0
+    assert matches == []
+
+
 @pytest.mark.parametrize(
     ("quantity", "expected_quantity", "expected_status"),
     [
@@ -1728,6 +1773,115 @@ def test_run_commercial_matcher_parses_requirement_quantity(
     assert quantity_analysis["parse_reason"]
 
 
+def test_run_commercial_matcher_preserves_original_error(
+    db,
+    test_id,
+    monkeypatch,
+):
+    import importlib
+
+    commercial_service = importlib.import_module("app.commercial.service")
+
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, _ = create_test_requirement(db, tender)
+
+    upsert_product(
+        db,
+        {
+            "name": f"Товар для проверки ошибки-{test_id}",
+            "technical_attributes": {"diameter": {"value": 10, "unit": "mm"}},
+        },
+    )
+    db.commit()
+
+    original_error = RuntimeError("matcher processing failed")
+
+    def fail_comparison(*args, **kwargs):
+        raise original_error
+
+    monkeypatch.setattr(
+        commercial_service,
+        "compare_product_to_requirement",
+        fail_comparison,
+    )
+
+    with pytest.raises(RuntimeError, match="matcher processing failed") as exc:
+        run_commercial_matcher(db, analysis.id, tender_analysis.id)
+
+    assert exc.value is original_error
+
+    failed_run = db.query(CommercialMatchRunDB).filter_by(
+        commercial_analysis_id=analysis.id,
+        status="Ошибка",
+    ).order_by(CommercialMatchRunDB.id.desc()).first()
+
+    assert failed_run is not None
+    assert failed_run.error == "matcher processing failed"
+    assert failed_run.completed_at is not None
+
+
+def test_run_commercial_matcher_preserves_original_error_if_failure_log_fails(
+    db,
+    test_id,
+    monkeypatch,
+):
+    import importlib
+
+    commercial_service = importlib.import_module("app.commercial.service")
+
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, _ = create_test_requirement(db, tender)
+
+    upsert_product(
+        db,
+        {
+            "name": f"Товар для проверки сбоя журнала-{test_id}",
+            "technical_attributes": {"diameter": {"value": 10, "unit": "mm"}},
+        },
+    )
+    db.commit()
+
+    original_error = RuntimeError("matcher processing failed")
+    persistence_error = RuntimeError("failure log commit failed")
+
+    def fail_comparison(*args, **kwargs):
+        raise original_error
+
+    def fail_commit():
+        raise persistence_error
+
+    monkeypatch.setattr(
+        commercial_service,
+        "compare_product_to_requirement",
+        fail_comparison,
+    )
+    monkeypatch.setattr(db, "commit", fail_commit)
+
+    with pytest.raises(RuntimeError, match="matcher processing failed") as exc:
+        run_commercial_matcher(db, analysis.id, tender_analysis.id)
+
+    assert exc.value is original_error
+
+    if hasattr(original_error, "__notes__"):
+        assert any(
+            "failure log commit failed" in note
+            for note in original_error.__notes__
+        )
+
+    db.rollback()
+
+    assert db.query(CommercialMatchRunDB).filter_by(
+        commercial_analysis_id=analysis.id,
+        status="Ошибка",
+    ).count() == 0
+
+
 def test_run_commercial_matcher_creates_full_match_and_preserves_evidence(
     db,
     test_id,
@@ -1762,6 +1916,8 @@ def test_run_commercial_matcher_creates_full_match_and_preserves_evidence(
 
     evidence = json.loads(match.evidence_references)
 
+    assert match.evidence_status == "Не проверено"
+    assert evidence["extraction_status"] == requirement.extraction_status
     assert run.status == "Завершён"
     assert run.statistics["requirements_total"] == 1
     # Matcher проверяет весь каталог, а не только товар этого теста.

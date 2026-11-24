@@ -15,7 +15,11 @@ def _normalize_name(value):
 def _normalize_unit(value):
     if value is None:
         return None
-    return str(value).strip().casefold()
+    if not isinstance(value, str):
+        return None
+
+    normalized = value.strip().casefold()
+    return normalized or None
 
 
 def _as_decimal(value):
@@ -23,9 +27,20 @@ def _as_decimal(value):
         return None
     try:
         normalized = str(value).strip().replace(",", ".")
-        return Decimal(normalized)
+        number = Decimal(normalized)
+        return number if number.is_finite() else None
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _is_non_finite_decimal(value):
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        normalized = str(value).strip().replace(",", ".")
+        return not Decimal(normalized).is_finite()
+    except (InvalidOperation, TypeError, ValueError):
+        return False
 
 
 def _product_attribute_value(value):
@@ -37,19 +52,59 @@ def _product_attribute_value(value):
 
 def _compare_values(required, actual, operator=None):
     """Возвращает True при подтверждённом соответствии, False при отличии, None при неопределённости."""
-    required_unit = _normalize_unit(required.get("unit"))
-    actual_value, actual_unit = _product_attribute_value(actual)
-    actual_unit = _normalize_unit(actual_unit)
+    required_unit_value = required.get("unit")
+    actual_value, actual_unit_value = _product_attribute_value(actual)
+
+    if (
+        required_unit_value is not None
+        and not isinstance(required_unit_value, str)
+    ) or (
+        actual_unit_value is not None
+        and not isinstance(actual_unit_value, str)
+    ):
+        return None
+
+    required_unit = _normalize_unit(required_unit_value)
+    actual_unit = _normalize_unit(actual_unit_value)
 
     if required_unit != actual_unit:
         return None
 
     expected_value = required.get("value")
+
+    # Пустые значения не являются подтверждением характеристики.
+    if (
+        expected_value is None
+        or actual_value is None
+        or (
+            isinstance(expected_value, str)
+            and not expected_value.strip()
+        )
+        or (
+            isinstance(actual_value, str)
+            and not actual_value.strip()
+        )
+    ):
+        return None
+
+    if (
+        _is_non_finite_decimal(expected_value)
+        or _is_non_finite_decimal(actual_value)
+    ):
+        return None
+
+    if operator is not None and not isinstance(operator, str):
+        return None
+
+    operation = (operator or "=").strip().casefold()
+    allowed_operators = {"=", "==", ">", ">=", "<", "<="}
+    if operation not in allowed_operators:
+        return None
+
     expected_number = _as_decimal(expected_value)
     actual_number = _as_decimal(actual_value)
 
     if expected_number is not None and actual_number is not None:
-        operation = (operator or "=").strip().casefold()
         comparisons = {
             "=": actual_number == expected_number,
             "==": actual_number == expected_number,
@@ -58,15 +113,42 @@ def _compare_values(required, actual, operator=None):
             "<": actual_number < expected_number,
             "<=": actual_number <= expected_number,
         }
-        return comparisons.get(operation)
+        return comparisons[operation]
 
-    if operator not in (None, "", "=", "=="):
+    if operation not in ("=", "=="):
         return None
 
-    if expected_value is None or actual_value is None:
+    # Числовые строки с неоднозначными разделителями нельзя
+    # подтверждать простым текстовым сравнением.
+    numeric_pattern = re.compile(r"^[+-]?[0-9][0-9.,\s]*$")
+    if (
+        expected_number is None
+        and isinstance(expected_value, str)
+        and numeric_pattern.fullmatch(expected_value.strip())
+    ) or (
+        actual_number is None
+        and isinstance(actual_value, str)
+        and numeric_pattern.fullmatch(actual_value.strip())
+    ):
         return None
 
-    return str(expected_value).strip().casefold() == str(actual_value).strip().casefold()
+    # Булевы значения сравниваются только с булевыми значениями.
+    if isinstance(expected_value, bool) or isinstance(actual_value, bool):
+        if (
+            isinstance(expected_value, bool)
+            and isinstance(actual_value, bool)
+            and operation in ("=", "==")
+        ):
+            return expected_value == actual_value
+        return None
+
+    # Текстовый fallback допустим только для двух строк.
+    # Списки, словари и прочие типы не подтверждают соответствие
+    # через совпадение их строкового представления.
+    if not isinstance(expected_value, str) or not isinstance(actual_value, str):
+        return None
+
+    return expected_value.strip().casefold() == actual_value.strip().casefold()
 
 
 def compare_product_to_requirement(requirement_attributes, product_attributes):
@@ -82,10 +164,17 @@ def compare_product_to_requirement(requirement_attributes, product_attributes):
     if not isinstance(product_attributes, dict):
         product_attributes = {}
 
-    product_index = {
-        _normalize_name(name): value
-        for name, value in product_attributes.items()
-    }
+    product_index = {}
+    ambiguous_product_keys = set()
+
+    for name, value in product_attributes.items():
+        key = _normalize_name(name)
+        if not key:
+            continue
+        if key in product_index:
+            ambiguous_product_keys.add(key)
+        else:
+            product_index[key] = value
 
     confirmed = []
     missing = []
@@ -93,7 +182,13 @@ def compare_product_to_requirement(requirement_attributes, product_attributes):
 
     required_attributes = [
         item for item in requirement_attributes
-        if isinstance(item, dict) and item.get("is_required") is not False
+        if (
+            isinstance(item, dict)
+            and item.get("is_required") is not False
+            and isinstance(item.get("name"), str)
+            and item["name"].strip()
+            and _normalize_name(item["name"])
+        )
     ]
 
     for item in required_attributes:
@@ -102,6 +197,16 @@ def compare_product_to_requirement(requirement_attributes, product_attributes):
             continue
 
         key = _normalize_name(name)
+
+        if key in ambiguous_product_keys:
+            missing.append({
+                "name": name,
+                "required_value": item.get("value"),
+                "unit": item.get("unit"),
+                "reason": "В каталоге обнаружены неоднозначные названия характеристики",
+            })
+            continue
+
         product_value = product_index.get(key)
 
         if product_value is None:
