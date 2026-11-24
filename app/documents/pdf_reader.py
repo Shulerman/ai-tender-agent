@@ -57,6 +57,51 @@ def _run_ocr(image):
         image_path.unlink(missing_ok=True)
 
 
+
+def _reconstruct_table_rows(rows):
+    """Объединяет строки-продолжения, сохраняя исходные строки и ячейки."""
+    headers = {
+        "артикул", "артикул товара", "код", "номер", "№", "№ п/п",
+        "п/п", "позиция", "наименование", "название",
+    }
+    result = []
+
+    for raw in rows:
+        cells = list(raw.get("cells") or [])
+        if not any(str(value).strip() for value in cells):
+            continue
+
+        first = str(cells[0] or "").strip().casefold()
+        previous = result[-1] if result else None
+        can_merge = (
+            previous is not None
+            and not first
+            and any(str(value).strip() for value in cells[1:])
+            and bool(str(previous["cells"][0] or "").strip())
+            and str(previous["cells"][0]).strip().casefold() not in headers
+        )
+
+        if can_merge:
+            width = max(len(previous["cells"]), len(cells))
+            previous["cells"] += [""] * (width - len(previous["cells"]))
+            cells += [""] * (width - len(cells))
+            previous["cells"] = [
+                " ".join(part for part in (
+                    str(previous["cells"][i] or "").strip(),
+                    str(cells[i] or "").strip(),
+                ) if part)
+                for i in range(width)
+            ]
+            previous["source_rows"].append(raw)
+        else:
+            result.append({
+                "cells": [str(value or "").strip() for value in cells],
+                "source_rows": [raw],
+            })
+
+    return result
+
+
 def _extract_tables(path, page_number):
     blocks = []
     warnings = []
@@ -68,12 +113,16 @@ def _extract_tables(path, page_number):
         return blocks, [f"Camelot network: {type(exc).__name__}: {exc}"]
 
     for table_index, table in enumerate(tables, start=1):
-        rows = getattr(table, "cells", None) or []
+        raw_rows = []
         report = getattr(table, "parsing_report", {}) or {}
-        for row_index, row in enumerate(rows, start=1):
+
+        for row_index, row in enumerate(
+            getattr(table, "cells", None) or [], start=1
+        ):
             cells = [str(cell.text or "").strip() for cell in row]
             if not any(cells):
                 continue
+
             cell_data = []
             for column_index, cell in enumerate(row, start=1):
                 cell_data.append({
@@ -87,18 +136,68 @@ def _extract_tables(path, page_number):
                         "y2": float(cell.y2),
                     },
                 })
-            text = " | ".join(cells)
+
+            raw_rows.append({
+                "row_number": row_index,
+                "cells": cells,
+                "cell_data": cell_data,
+            })
+
+        for reconstructed in _reconstruct_table_rows(raw_rows):
+            source_rows = reconstructed["source_rows"]
+            width = len(reconstructed["cells"])
+            merged_cell_data = []
+
+            for column_index in range(width):
+                source_cells = [
+                    row["cell_data"][column_index]
+                    for row in source_rows
+                    if column_index < len(row["cell_data"])
+                ]
+                coordinates = [
+                    cell["coordinates"] for cell in source_cells
+                ]
+                coords = {}
+                if coordinates:
+                    coords = {
+                        "x1": min(c["x1"] for c in coordinates),
+                        "y1": min(c["y1"] for c in coordinates),
+                        "x2": max(c["x2"] for c in coordinates),
+                        "y2": max(c["y2"] for c in coordinates),
+                    }
+                merged_cell_data.append({
+                    "row": source_rows[0]["row_number"],
+                    "column": column_index + 1,
+                    "text": reconstructed["cells"][column_index],
+                    "coordinates": coords,
+                    "source_cells": source_cells,
+                })
+
+            row_numbers = [row["row_number"] for row in source_rows]
+            first_row, last_row = row_numbers[0], row_numbers[-1]
+            row_label = (
+                str(first_row) if first_row == last_row
+                else f"{first_row}-{last_row}"
+            )
+            text = " | ".join(reconstructed["cells"])
+
             blocks.append({
                 "locator_type": "table_row",
-                "locator_value": f"table={table_index};row={row_index}",
+                "locator_value": f"table={table_index};row={row_label}",
                 "text": text,
                 "metadata_json": {
                     "page_number": page_number,
                     "block_type": "table_row",
-                    "extraction_method": "camelot_network",
+                    "extraction_method": (
+                        "camelot_network_reconstructed"
+                        if len(source_rows) > 1 else "camelot_network"
+                    ),
                     "table_number": table_index,
-                    "row_number": row_index,
-                    "cells": cell_data,
+                    "row_number": first_row,
+                    "source_row_numbers": row_numbers,
+                    "reconstructed": len(source_rows) > 1,
+                    "cells": merged_cell_data,
+                    "source_rows": source_rows,
                     "table_bbox": [
                         float(x) for x in getattr(table, "_bbox", ())
                     ],
@@ -108,8 +207,8 @@ def _extract_tables(path, page_number):
                     },
                 },
             })
-    return blocks, warnings
 
+    return blocks, warnings
 
 def extract_pages_from_pdf(file_path: str) -> list[dict]:
     path = Path(file_path)

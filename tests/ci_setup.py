@@ -6,34 +6,15 @@
 Не предназначены для юридического анализа.
 """
 
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 
 from app.database import (
-    Base,
     engine,
     SessionLocal,
     LegalActDB,
     LegalVersionDB,
     LegalProvisionDB,
 )
-
-from app.commercial.models import (
-    ManufacturerDB,
-    SupplierDB,
-    PriceListImportDB,
-    PriceListImportRowDB,
-    ProductDB,
-    SupplierOfferDB,
-    SupplierOfferVerificationDB,
-    SupplierProductMappingDB,
-    ProductUnitConversionDB,
-    ProductDuplicateReviewDB,
-    CommercialAnalysisDB,
-    CommercialMatchRunDB,
-    CommercialMatchDB,
-)
-
-from app.documents import models as document_models  # noqa: F401
 
 VERSION_ID = "44-FZ-2026-10-01"
 
@@ -73,59 +54,27 @@ TEST_ARTICLES = [
 
 
 def main():
-    Base.metadata.create_all(bind=engine)
-
     if engine.dialect.name != "sqlite":
         raise RuntimeError("CI setup ожидает SQLite-базу.")
 
-    with engine.begin() as connection:
-        columns = {
-            column["name"]
-            for column in inspect(connection).get_columns("supplier_offers")
-        }
+    try:
+        with engine.connect() as connection:
+            revision = connection.execute(
+                text("SELECT version_num FROM alembic_version")
+            ).scalar_one_or_none()
+    except Exception as exc:
+        raise RuntimeError(
+            "Схема БД не подготовлена Alembic. "
+            "Сначала выполните: python -m alembic upgrade head"
+        ) from exc
 
-        if "unit" not in columns:
-            connection.execute(
-                text("ALTER TABLE supplier_offers ADD COLUMN unit VARCHAR")
-            )
-            print("Добавлена колонка supplier_offers.unit")
-
-        product_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns("products")
-        }
-
-        if "technical_attributes" not in product_columns:
-            connection.execute(
-                text(
-                    "ALTER TABLE products "
-                    "ADD COLUMN technical_attributes JSON"
-                )
-            )
-            print("Добавлена колонка products.technical_attributes")
-
-        match_columns = {
-            column["name"]
-            for column in inspect(connection).get_columns("commercial_matches")
-        }
-
-        if "tender_requirement_id" not in match_columns:
-            connection.execute(
-                text(
-                    "ALTER TABLE commercial_matches "
-                    "ADD COLUMN tender_requirement_id INTEGER"
-                )
-            )
-            print("Добавлена колонка commercial_matches.tender_requirement_id")
-
-        if "match_run_id" not in match_columns:
-            connection.execute(
-                text(
-                    "ALTER TABLE commercial_matches "
-                    "ADD COLUMN match_run_id INTEGER"
-                )
-            )
-            print("Добавлена колонка commercial_matches.match_run_id")
+    expected_revision = "28d979223ef8"
+    if revision != expected_revision:
+        raise RuntimeError(
+            f"Неверная ревизия БД: {revision!r}; "
+            f"ожидается {expected_revision!r}. "
+            "Выполните: python -m alembic upgrade head"
+        )
 
     db = SessionLocal()
 
@@ -183,7 +132,7 @@ def main():
             LegalProvisionDB.version_id == VERSION_ID
         ).count()
 
-        print(f"Таблицы созданы. Тестовых статей: {count}")
+        print(f"Тестовые данные подготовлены. Статей: {count}")
         print("ТЕСТОВАЯ БАЗА ГОТОВА")
 
     except Exception:
