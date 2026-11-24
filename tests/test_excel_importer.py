@@ -284,6 +284,8 @@ def test_unknown_sheet_is_rejected(price_list_file):
     [
         ("1250,75", Decimal("1250.75")),
         ("1 250,50", Decimal("1250.50")),
+        ("1\u00a0250,50", Decimal("1250.50")),
+        ("1\u202f250,50", Decimal("1250.50")),
         ("1.250,50", Decimal("1250.50")),
         ("1,250.50", Decimal("1250.50")),
     ],

@@ -1,5 +1,9 @@
 from datetime import datetime, timedelta
+import io
+import json
 import uuid
+
+from openpyxl import Workbook
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +22,7 @@ from app.commercial.models import (
     ProductDB,
     SupplierDB,
     SupplierOfferDB,
+    PriceListImportRowDB,
 )
 from app.commercial.service import create_commercial_analysis
 
@@ -599,3 +604,80 @@ def test_compare_offers_api_keeps_expired_confirmed_offer_separate(client, db):
         "Требуется уточнить у поставщика актуальность цены и наличия"
     )
     assert float(expired["landed_total"]) == 1500
+
+
+def test_excel_imported_catalog_product_is_used_by_matcher_api(
+    client, db, tmp_path, monkeypatch
+):
+    supplier = SupplierDB(name=f"Matcher Excel supplier {uuid.uuid4().hex}")
+    article = f"MATCHER-EXCEL-{uuid.uuid4().hex}"
+    product = ProductDB(
+        name=f"Matcher Excel product {article}",
+        article_number=article,
+        technical_attributes={
+            "diameter": {"value": 10, "unit": "mm"},
+            "material": "steel",
+        },
+        created_at=datetime.now(),
+    )
+    db.add_all([supplier, product])
+    db.commit()
+    db.refresh(supplier)
+    db.refresh(product)
+
+    _, analysis, tender_analysis, _ = create_scenario(db)
+    monkeypatch.setattr(
+        main_module, "COMMERCIAL_PRICE_LISTS_DIR", tmp_path
+    )
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Прайс"
+    sheet.append(["Артикул", "Наименование", "Цена", "Валюта", "Ед. изм."])
+    sheet.append([article, product.name, 150, "RUB", "шт."])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+
+    imported = client.post(
+        "/commercial/imports/excel",
+        data={
+            "supplier_id": str(supplier.id),
+            "column_mapping": json.dumps({
+                "article_number": 1,
+                "name": 2,
+                "price": 3,
+                "currency": 4,
+                "unit": 5,
+            }),
+            "header_row": "1",
+            "sheet_name": "Прайс",
+        },
+        files={"file": (
+            "matcher.xlsx",
+            buffer.getvalue(),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )},
+    )
+
+    assert imported.status_code == 200
+    import_id = imported.json()["result"]["import_id"]
+
+    import_row = db.query(PriceListImportRowDB).filter_by(
+        import_id=import_id
+    ).one()
+    assert import_row.product_id == product.id
+
+    response = client.post(
+        f"/commercial/analyses/{analysis.id}/matches/run",
+        json={"tender_analysis_id": tender_analysis.id},
+    )
+
+    assert response.status_code == 200
+    run_id = response.json()["id"]
+    match = db.query(CommercialMatchDB).filter_by(
+        match_run_id=run_id,
+        product_id=product.id,
+    ).one()
+
+    assert match.match_status == "Полное соответствие"
+    assert response.json()["statistics"]["matches_created"] >= 1

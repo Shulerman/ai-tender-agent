@@ -262,7 +262,8 @@ def _parse_decimal(value, field_name):
         if isinstance(value, str):
             normalized = (
                 value.strip()
-                .replace("\\u00a0", "")
+                .replace("\u00a0", "")
+                .replace("\u202f", "")
                 .replace(" ", "")
             )
 

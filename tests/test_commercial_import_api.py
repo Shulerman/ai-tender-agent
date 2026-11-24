@@ -72,6 +72,130 @@ def create_excel(article_number="API-001", product_name="Тестовый тов
     return buffer.getvalue()
 
 
+
+def test_excel_import_end_to_end(
+    client, db, tmp_path, monkeypatch
+):
+    supplier = SupplierDB(name=f"E2E supplier {uuid.uuid4().hex}")
+    article = f"E2E-{uuid.uuid4().hex}"
+    known_product = ProductDB(
+        name=f"Known {article}",
+        article_number=article,
+        created_at=datetime.now(),
+    )
+    db.add_all([supplier, known_product])
+    db.commit()
+    db.refresh(supplier)
+    db.refresh(known_product)
+
+    monkeypatch.setattr(
+        main_module, "COMMERCIAL_PRICE_LISTS_DIR", tmp_path
+    )
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Прайс"
+    sheet.append(["Артикул", "Наименование", "Цена", "Валюта", "Ед. изм."])
+    sheet.append([article, known_product.name, 150, "RUB", "шт."])
+    sheet.append(["UNKNOWN-E2E", "Новый товар", 275, "RUB", "шт."])
+    buffer = io.BytesIO()
+    workbook.save(buffer)
+    content = buffer.getvalue()
+
+    mapping = {
+        "article_number": 1, "name": 2, "price": 3,
+        "currency": 4, "unit": 5,
+    }
+
+    def upload():
+        return client.post(
+            "/commercial/imports/excel",
+            data={
+                "supplier_id": str(supplier.id),
+                "column_mapping": json.dumps(mapping, ensure_ascii=False),
+                "header_row": "1",
+                "sheet_name": "Прайс",
+            },
+            files={"file": (
+                "e2e.xlsx", content,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )},
+        )
+
+    first_response = upload()
+    assert first_response.status_code == 200
+    first_id = first_response.json()["result"]["import_id"]
+
+    rows = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=first_id)
+        .order_by(PriceListImportRowDB.source_row)
+        .all()
+    )
+    assert len(rows) == 2
+    assert rows[0].product_id == known_product.id
+    assert rows[1].product_id is None
+    unmatched_row_id = rows[1].id
+
+    unmatched = client.get(
+        f"/commercial/imports/{first_id}/unmatched"
+    )
+    assert unmatched.status_code == 200
+    assert unmatched.json()["count"] == 1
+    assert unmatched.json()["rows"][0]["row_id"] == unmatched_row_id
+
+    manual_product = ProductDB(
+        name=f"Manual target {uuid.uuid4().hex}",
+        article_number=f"MANUAL-{uuid.uuid4().hex}",
+        created_at=datetime.now(),
+    )
+    db.add(manual_product)
+    db.commit()
+    db.refresh(manual_product)
+
+    matched = client.post(
+        f"/commercial/imports/{first_id}/rows/{unmatched_row_id}/match",
+        json={"product_id": manual_product.id},
+    )
+    assert matched.status_code == 200
+    db.refresh(rows[1])
+    assert rows[1].product_id == manual_product.id
+
+    first_offers = (
+        db.query(SupplierOfferDB)
+        .filter_by(supplier_id=supplier.id, import_id=first_id)
+        .all()
+    )
+    assert len(first_offers) == 2
+
+    second_response = upload()
+    assert second_response.status_code == 200
+    second_id = second_response.json()["result"]["import_id"]
+    assert second_id != first_id
+
+    second_rows = (
+        db.query(PriceListImportRowDB)
+        .filter_by(import_id=second_id)
+        .order_by(PriceListImportRowDB.source_row)
+        .all()
+    )
+    assert len(second_rows) == 2
+    assert [row.product_id for row in second_rows] == [
+        known_product.id, manual_product.id
+    ]
+    assert all(row.status == "Сопоставлен" for row in second_rows)
+
+    offers = (
+        db.query(SupplierOfferDB)
+        .filter(
+            SupplierOfferDB.supplier_id == supplier.id,
+            SupplierOfferDB.import_id.in_([first_id, second_id]),
+        )
+        .all()
+    )
+    assert len(offers) == 4
+    assert sorted(offer.price for offer in offers) == [150, 150, 275, 275]
+
 def test_excel_preview_api(client):
     response = client.post(
         "/commercial/imports/excel/preview",
