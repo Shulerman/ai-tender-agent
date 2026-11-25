@@ -9,6 +9,8 @@ import pdfplumber
 import pypdfium2 as pdfium
 from pypdf import PdfReader
 
+from app.documents.pdf_layout import detect_table_regions
+
 
 TESSERACT_CANDIDATES = [
     os.environ.get("TESSERACT_CMD"),
@@ -210,6 +212,95 @@ def _extract_tables(path, page_number):
 
     return blocks, warnings
 
+def _suppress_native_table_text(page, table_blocks, original_text):
+    """
+    Убирает нативный текст только в областях, подтверждённых одновременно
+    геометрией Camelot и независимым детектором повторяющихся строк.
+    При любой неопределённости сохраняет исходный текст.
+    """
+    try:
+        from app.documents.pdf_layout import detect_table_regions
+
+        regions = detect_table_regions(page)
+        if not regions:
+            return original_text, []
+
+        table_boxes = {}
+        for block in table_blocks:
+            metadata = block.get("metadata_json") or {}
+            table_number = metadata.get("table_number")
+            bbox = metadata.get("table_bbox")
+            if (
+                isinstance(table_number, int)
+                and isinstance(bbox, (list, tuple))
+                and len(bbox) == 4
+            ):
+                try:
+                    box = tuple(float(value) for value in bbox)
+                    if all(__import__("math").isfinite(v) for v in box):
+                        table_boxes.setdefault(table_number, box)
+                except (TypeError, ValueError):
+                    continue
+
+        confirmed = []
+        for table_number, (x1, y1, x2, y2) in table_boxes.items():
+            left, right = sorted((x1, x2))
+            top, bottom = sorted((page.height - y2, page.height - y1))
+
+            for region in regions:
+                words = [
+                    word
+                    for line in region.get("lines", [])
+                    for word in line.get("words", [])
+                ]
+                if not words:
+                    continue
+
+                region_left = min(float(word["x0"]) for word in words)
+                region_right = max(float(word["x1"]) for word in words)
+                region_top = float(region["top"])
+                region_bottom = float(region["bottom"])
+
+                overlap_x = min(right, region_right) - max(left, region_left)
+                overlap_y = min(bottom, region_bottom) - max(top, region_top)
+
+                if overlap_x >= 5 and overlap_y >= 5:
+                    confirmed.append(
+                        (left, top, right, bottom, table_number)
+                    )
+                    break
+
+        if not confirmed:
+            return original_text, []
+
+        def keep_char(char):
+            if char.get("object_type") != "char":
+                return True
+            x0 = float(char.get("x0", 0))
+            x1 = float(char.get("x1", 0))
+            char_top = float(char.get("top", 0))
+            char_bottom = float(char.get("bottom", 0))
+            center_x = (x0 + x1) / 2
+            center_y = (char_top + char_bottom) / 2
+
+            return not any(
+                left <= center_x <= right
+                and top <= center_y <= bottom
+                for left, top, right, bottom, _ in confirmed
+            )
+
+        filtered_text = page.filter(keep_char).extract_text() or ""
+        if not filtered_text.strip():
+            return original_text, []
+
+        table_numbers = sorted({item[4] for item in confirmed})
+        return filtered_text, table_numbers
+
+    except Exception:
+        # Fail-open: сбой фильтрации не должен приводить к потере текста.
+        return original_text, []
+
+
 def extract_pages_from_pdf(file_path: str) -> list[dict]:
     path = Path(file_path)
     if not path.exists():
@@ -269,6 +360,19 @@ def extract_pages_from_pdf(file_path: str) -> list[dict]:
                         "пока не выполняется"
                     )
 
+                table_blocks, table_warnings = _extract_tables(
+                    path, page_number
+                )
+                warnings.extend(table_warnings)
+
+                suppressed_tables = []
+                if extraction_method == "pdfplumber_native" and table_blocks:
+                    selected_text, suppressed_tables = (
+                        _suppress_native_table_text(
+                            page, table_blocks, selected_text
+                        )
+                    )
+
                 page_metadata = {
                     "page_number": page_number,
                     "block_type": "page_text",
@@ -282,6 +386,11 @@ def extract_pages_from_pdf(file_path: str) -> list[dict]:
                     "document_metadata": document_metadata,
                     "warnings": warnings,
                     "status": "warning" if warnings else "ok",
+                    "table_text_suppression": {
+                        "method": "camelot_bbox_confirmed_by_layout"
+                        if suppressed_tables else None,
+                        "suppressed_table_numbers": suppressed_tables,
+                    },
                 }
 
                 page_blocks = []
@@ -293,14 +402,7 @@ def extract_pages_from_pdf(file_path: str) -> list[dict]:
                         "metadata_json": page_metadata,
                     })
 
-                table_blocks, table_warnings = _extract_tables(
-                    path, page_number
-                )
                 page_blocks.extend(table_blocks)
-                warnings.extend(table_warnings)
-                page_metadata["warnings"] = warnings
-                if warnings:
-                    page_metadata["status"] = "warning"
 
                 pages.append({
                     "page_number": page_number,

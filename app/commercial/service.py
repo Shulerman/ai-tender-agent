@@ -1,4 +1,4 @@
-import json
+﻿import json
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
@@ -769,6 +769,12 @@ def create_commercial_match(db: Session, match_data: dict):
 
         if requirement is None:
             raise ValueError("Требование тендера не найдено")
+
+        if requirement.requirement_type != "product":
+            raise ValueError(
+                "Для коммерческого сопоставления допускаются "
+                "только товарные требования"
+            )
 
         requirement_analysis = db.get(
             TenderAnalysisDB,

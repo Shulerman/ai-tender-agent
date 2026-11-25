@@ -126,3 +126,80 @@ def test_build_requirement_records_does_not_assign_ambiguous_source():
     assert records[0].source_chunk_id is None
     assert records[0].evidence_quote is None
     assert records[0].extraction_status == "Требует проверки"
+
+
+
+def test_build_requirement_records_preserves_general_technical_requirement():
+    chunk = SimpleNamespace(
+        id=41,
+        text="Общие требования: эксплуатация при температуре от -10 до +40 °C.",
+    )
+    records = _build_requirement_records(
+        analysis_result={
+            "products": [],
+            "technical_requirements": [
+                {
+                    "name": "Температура эксплуатации",
+                    "value": "-10 до +40",
+                    "unit": "°C",
+                    "operator": None,
+                    "is_required": True,
+                    "description": "",
+                    "quotes": [
+                        "эксплуатация при температуре от -10 до +40 °C"
+                    ],
+                    "evidence": [
+                        {
+                            "claim": "Допустимая температура от -10 до +40 °C",
+                            "quote": (
+                                "эксплуатация при температуре от -10 до +40 °C"
+                            ),
+                            "relevance_status": "Недостаточно данных",
+                        }
+                    ],
+                }
+            ],
+            "delivery_requirements": [],
+            "document_requirements": [],
+            "risks_and_uncertainties": [],
+        },
+        chunks=[chunk],
+        analysis_id=20,
+        document_id=30,
+    )
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.requirement_type == "technical"
+    assert record.requirement_text == (
+        "Температура эксплуатации: -10 до +40 °C"
+    )
+    assert record.source_chunk_id == 41
+    assert record.extraction_status == "Источник найден"
+    assert record.attributes["is_required"] is True
+    assert record.attributes["semantic_evidence_status"] == "Не подтверждено"
+    assert (
+        record.attributes["evidence"][0]["relevance_status"]
+        == "Недостаточно данных"
+    )
+
+
+def test_semantic_evidence_status_requires_all_evidence_to_confirm():
+    from app.documents.analysis_service import _semantic_evidence_status
+
+    assert _semantic_evidence_status({"evidence": []}) == "Не проверено"
+    assert _semantic_evidence_status({
+        "evidence": [
+            {"relevance_status": "Подтверждает"},
+            {"relevance_status": "Ожидает проверки"},
+        ]
+    }) == "Не подтверждено"
+    assert _semantic_evidence_status({
+        "evidence": [
+            {"relevance_status": "Подтверждает"},
+            {"relevance_status": "Подтверждает"},
+        ]
+    }) == "Подтверждено"
+    assert _semantic_evidence_status({
+        "evidence": [{"relevance_status": "Противоречит"}]
+    }) == "Противоречит"

@@ -2100,3 +2100,27 @@ def test_run_commercial_matcher_does_not_estimate_ambiguous_quantity(
     assert match.estimated_quantity is None
     assert evidence["quantity_analysis"]["parse_status"] == "ambiguous"
     assert evidence["quantity_analysis"]["source_quantity"] == "от 10 до 20"
+
+
+
+def test_manual_commercial_match_rejects_technical_requirement(db):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, _, requirement = create_test_requirement(db, tender)
+    requirement.requirement_type = "technical"
+    db.commit()
+
+    with pytest.raises(
+        ValueError,
+        match="только товарные требования",
+    ):
+        create_commercial_match(
+            db,
+            {
+                "analysis_id": analysis.id,
+                "tender_requirement_id": requirement.id,
+                "tender_requirement": requirement.requirement_text,
+            },
+        )

@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import uuid
 
 import pytest
@@ -34,7 +34,10 @@ def document_with_chunks():
         sequence_number=1,
         locator_type="paragraph",
         locator_value="1",
-        text="Технические требования к товару.",
+        text=(
+            "Технические требования к товару. "
+            "Общие требования: эксплуатация при температуре от -10 до +40 °C."
+        ),
     )
     second_chunk = DocumentChunkDB(
         document_id=document.id,
@@ -118,6 +121,29 @@ def test_analyze_and_save_document_requirements(
                     "rejected_quotes": [],
                 }
             ],
+            "technical_requirements": [
+                {
+                    "name": "Температура эксплуатации",
+                    "value": "-10 до +40",
+                    "unit": "°C",
+                    "operator": None,
+                    "is_required": True,
+                    "description": "",
+                    "quotes": [
+                        "эксплуатация при температуре от -10 до +40 °C"
+                    ],
+                    "evidence": [
+                        {
+                            "claim": "Эксплуатация от -10 до +40 °C",
+                            "quote": (
+                                "эксплуатация при температуре от -10 до +40 °C"
+                            ),
+                            "relevance_status": "Проверка не выполнена",
+                            "relevance_explanation": "Тестовый статус.",
+                        }
+                    ],
+                }
+            ],
             "delivery_requirements": [],
             "document_requirements": [],
             "risks_and_uncertainties": [],
@@ -138,8 +164,8 @@ def test_analyze_and_save_document_requirements(
     )
 
     assert result["status"] == "Завершён"
-    assert result["requirements_count"] == 1
-    assert result["requirements_with_source"] == 1
+    assert result["requirements_count"] == 2
+    assert result["requirements_with_source"] == 2
 
     analysis = db.get(TenderAnalysisDB, result["analysis_id"])
 
@@ -151,9 +177,33 @@ def test_analyze_and_save_document_requirements(
     assert analysis.result_json["products"][0]["name"] == "Тестовый товар"
     assert analysis.result_json["products"][0]["attributes"][0]["name"] == "Диаметр"
 
-    requirement = db.query(TenderRequirementDB).filter_by(
+    requirements = db.query(TenderRequirementDB).filter_by(
         analysis_id=analysis.id
-    ).one()
+    ).all()
+    assert len(requirements) == 2
+
+    requirement = next(
+        item for item in requirements
+        if item.requirement_type == "product"
+    )
+    technical_requirement = next(
+        item for item in requirements
+        if item.requirement_type == "technical"
+    )
+
+    assert technical_requirement.requirement_text == (
+        "Температура эксплуатации: -10 до +40 °C"
+    )
+    assert technical_requirement.source_chunk_id == first_chunk.id
+    assert technical_requirement.extraction_status == "Источник найден"
+    assert (
+        technical_requirement.attributes["semantic_evidence_status"]
+        == "Не подтверждено"
+    )
+    assert (
+        technical_requirement.attributes["evidence"][0]["relevance_status"]
+        == "Проверка не выполнена"
+    )
 
     assert requirement.document_id == document.id
     assert requirement.requirement_type == "product"
@@ -171,6 +221,144 @@ def test_analyze_and_save_document_requirements(
         "Диаметр изделия — не менее 20 мм."
     )
 
+
+
+def test_persists_all_30_general_technical_requirements(
+    document_with_chunks,
+    monkeypatch,
+):
+    db, document, first_chunk, _ = document_with_chunks
+
+    expected = []
+    source_lines = []
+
+    for number in range(1, 31):
+        required = number % 3 == 0
+        status = "обязательно" if required else "справочно"
+        quote = (
+            f"Параметр {number:02d} | "
+            f"Значение {number:02d} | {status}"
+        )
+        source_lines.append(quote)
+        expected.append({
+            "name": f"Параметр {number:02d}",
+            "value": f"Значение {number:02d}",
+            "is_required": required,
+            "quote": quote,
+        })
+
+    first_chunk.text = "\n".join(source_lines)
+    db.commit()
+
+    async def fake_analyzer(document_text):
+        for item in expected:
+            assert item["quote"] in document_text
+
+        return {
+            "products": [],
+            "technical_requirements": [
+                {
+                    "name": item["name"],
+                    "value": item["value"],
+                    "unit": None,
+                    "operator": None,
+                    "is_required": item["is_required"],
+                    "description": "",
+                    "quotes": [item["quote"]],
+                    "evidence": [
+                        {
+                            "claim": (
+                                f'{item["name"]}: {item["value"]}'
+                            ),
+                            "quote": item["quote"],
+                            "relevance_status": "Подтверждает",
+                            "relevance_explanation": (
+                                "Тестовая проверка соответствия."
+                            ),
+                        }
+                    ],
+                    "evidence_status": "Подтверждено",
+                    "rejected_quotes": [],
+                }
+                for item in expected
+            ],
+            "delivery_requirements": [],
+            "document_requirements": [],
+            "risks_and_uncertainties": [],
+            "questions_to_customer": [],
+        }
+
+    monkeypatch.setattr(
+        analysis_service,
+        "analyze_technical_requirements",
+        fake_analyzer,
+    )
+
+    result = asyncio.run(
+        analysis_service.analyze_and_save_document_requirements(
+            db,
+            document.id,
+        )
+    )
+
+    assert result["status"] == "Завершён"
+    assert result["requirements_count"] == 30
+    assert result["requirements_with_source"] == 30
+
+    analysis = db.get(TenderAnalysisDB, result["analysis_id"])
+    assert analysis is not None
+    assert analysis.status == "Завершён"
+    assert len(analysis.result_json["technical_requirements"]) == 30
+
+    records = (
+        db.query(TenderRequirementDB)
+        .filter_by(analysis_id=analysis.id)
+        .all()
+    )
+
+    assert len(records) == 30
+    assert all(
+        record.requirement_type == "technical"
+        for record in records
+    )
+
+    records_by_name = {
+        record.attributes["name"]: record
+        for record in records
+    }
+    assert len(records_by_name) == 30
+
+    for item in expected:
+        record = records_by_name[item["name"]]
+
+        assert record.requirement_text == (
+            f'{item["name"]}: {item["value"]}'
+        )
+        assert record.attributes["value"] == item["value"]
+        assert (
+            record.attributes["is_required"]
+            is item["is_required"]
+        )
+        assert record.source_chunk_id == first_chunk.id
+        assert record.extraction_status == "Источник найден"
+        assert record.evidence_quote == item["quote"]
+        assert (
+            record.attributes["semantic_evidence_status"]
+            == "Подтверждено"
+        )
+        assert (
+            record.attributes["evidence"][0]["relevance_status"]
+            == "Подтверждает"
+        )
+
+    assert sum(
+        record.attributes["is_required"] is True
+        for record in records
+    ) == 10
+    assert sum(
+        record.attributes["is_required"] is False
+        for record in records
+    ) == 20
 
 def test_analyzer_error_is_saved_without_requirements(
     document_with_chunks,

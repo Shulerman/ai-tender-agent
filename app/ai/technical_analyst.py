@@ -1,10 +1,26 @@
 ﻿import json
+import tempfile
 
 from pydantic import ValidationError
 
 from app.ai.gemini import generate_text
 from app.ai.evidence_validator import validate_quotes
+from app.ai.evidence_relevance_validator import validate_evidence_relevance
 from app.ai.technical_models import TechnicalAnalysis
+
+
+def _save_invalid_json_response(response_text: str) -> str:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".txt",
+        prefix="gemini_json_error_",
+        dir=tempfile.gettempdir(),
+        delete=False,
+    ) as diagnostic_file:
+        diagnostic_file.write(response_text)
+
+    return diagnostic_file.name
 
 
 def validate_analysis_evidence(
@@ -24,6 +40,7 @@ def validate_analysis_evidence(
 
     sections = [
         analysis.products,
+        analysis.technical_requirements,
         analysis.delivery_requirements,
         analysis.document_requirements,
         analysis.risks_and_uncertainties,
@@ -137,7 +154,37 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 В evidence каждое утверждение должно быть связано
 с отдельной точной цитатой, которая относится именно к нему.
 
-2. СРОКИ И УСЛОВИЯ ПОСТАВКИ
+2. ОБЩИЕ ТЕХНИЧЕСКИЕ ТРЕБОВАНИЯ
+
+Извлеки отдельным списком технические требования, которые относятся
+к документу, объекту закупки в целом или нескольким товарам одновременно,
+но не могут быть уверенно привязаны к одной конкретной позиции.
+
+Включай:
+- общие таблицы технических параметров и характеристик;
+- условия эксплуатации, окружающей среды и совместимости;
+- требования к монтажу, подключению, настройке и испытаниям;
+- требования к материалам, конструкции, безопасности и производительности;
+- общие технические ограничения и условия применения.
+
+Не дублируй здесь характеристики, уже однозначно отнесённые к конкретному
+товару в products[].attributes.
+
+Для каждой строки таблицы сохраняй исходные название, значение, единицу
+измерения и оператор сравнения. Не теряй числовые диапазоны и составные
+значения. is_required:
+- true — обязательность прямо указана в документе;
+- false — прямо указано, что параметр справочный или информационный;
+- null — статус обязательности неясен.
+
+Для общего текстового условия используй name как краткое название,
+description как точное содержание условия, value оставляй «Не указано»,
+если отдельного значения нет.
+
+Добавляй quotes и evidence только при наличии точного текста в документе.
+Не превращай справочные параметры в обязательные требования.
+
+3. СРОКИ И УСЛОВИЯ ПОСТАВКИ
 
 Найди все сведения о сроках поставки во всём документе,
 включая техническое задание, проект контракта, приложения
@@ -160,7 +207,7 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 - quotes: точные цитаты из документа;
 - evidence: отдельные связки «утверждение — цитата».
 
-3. ДОКУМЕНТЫ И ПОДТВЕРЖДЕНИЯ
+4. ДОКУМЕНТЫ И ПОДТВЕРЖДЕНИЯ
 
 Выдели все требования к:
 - сертификатам;
@@ -177,7 +224,7 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 - quotes: точные цитаты;
 - evidence: связки «утверждение — цитата».
 
-4. РИСКИ И НЕОПРЕДЕЛЁННОСТИ
+5. РИСКИ И НЕОПРЕДЕЛЁННОСТИ
 
 Найди:
 - противоречия между разделами документации;
@@ -234,6 +281,14 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 Верни только корректный JSON без Markdown-разметки
 и пояснений за пределами JSON.
 
+СТРОГИЕ ПРАВИЛА ДЛЯ JSON:
+- questions_to_customer должен быть массивом обычных строк.
+- Каждый вопрос записывай отдельной JSON-строкой в двойных кавычках.
+- Не используй имена переменных, присваивания, конструкции Python
+  или JavaScript, комментарии и выражения внутри JSON.
+- Не добавляй пояснения и текст за пределами JSON.
+- Все ключи и строковые значения JSON заключай в двойные кавычки.
+
 Структура:
 
 {{
@@ -264,6 +319,23 @@ async def analyze_technical_requirements(document_text: str) -> dict:
       "evidence": [
         {{
           "claim": "Конкретное утверждение",
+          "quote": "Дословная цитата из документа"
+        }}
+      ]
+    }}
+  ],
+  "technical_requirements": [
+    {{
+      "name": "Название общего параметра или условия",
+      "value": "Значение или Не указано",
+      "unit": null,
+      "operator": null,
+      "is_required": null,
+      "description": "",
+      "quotes": [],
+      "evidence": [
+        {{
+          "claim": "Конкретное техническое утверждение",
           "quote": "Дословная цитата из документа"
         }}
       ]
@@ -306,7 +378,9 @@ async def analyze_technical_requirements(document_text: str) -> dict:
       ]
     }}
   ],
-  "questions_to_customer": []
+  "questions_to_customer": [
+    "Конкретный вопрос заказчику"
+  ]
 }}
 
 ТЕКСТ ДОКУМЕНТА ДЛЯ АНАЛИЗА:
@@ -314,8 +388,8 @@ async def analyze_technical_requirements(document_text: str) -> dict:
 {document_text}
 """
 
-    result = await generate_text(prompt, json_mode=True)
-    result = result.strip()
+    raw_result = await generate_text(prompt, json_mode=True)
+    result = raw_result.strip()
 
     if result.startswith("```json"):
         result = result[7:]
@@ -330,8 +404,19 @@ async def analyze_technical_requirements(document_text: str) -> dict:
     try:
         parsed_result = json.loads(result)
     except json.JSONDecodeError as error:
+        try:
+            diagnostic_path = _save_invalid_json_response(raw_result)
+            diagnostic_detail = (
+                f"; исходный ответ сохранён в: {diagnostic_path}"
+            )
+        except OSError:
+            diagnostic_detail = (
+                "; не удалось создать диагностический файл в TEMP"
+            )
+
         raise RuntimeError(
             f"Gemini вернул некорректный JSON: {error}"
+            f"{diagnostic_detail}"
         ) from error
 
     try:
@@ -343,5 +428,6 @@ async def analyze_technical_requirements(document_text: str) -> dict:
         ) from error
 
     validate_analysis_evidence(validated_result, document_text)
+    await validate_evidence_relevance(validated_result)
 
     return validated_result.model_dump()

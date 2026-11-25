@@ -36,6 +36,21 @@ class ProductAnalysis(BaseModel):
     rejected_quotes: list[str] = Field(default_factory=list)
 
 
+class TechnicalRequirement(BaseModel):
+    """Общее техническое требование, не привязанное к одной позиции товара."""
+
+    name: str
+    value: str = NOT_SPECIFIED
+    unit: str | None = None
+    operator: str | None = None
+    is_required: bool | None = None
+    description: str = ""
+    quotes: list[str] = Field(default_factory=list)
+    evidence: list[Evidence] = Field(default_factory=list)
+    evidence_status: str = EVIDENCE_NOT_CHECKED
+    rejected_quotes: list[str] = Field(default_factory=list)
+
+
 class DeliveryRequirement(BaseModel):
     delivery_time: str = NOT_SPECIFIED
     delivery_address: str = NOT_SPECIFIED
@@ -82,6 +97,7 @@ class Risk(BaseModel):
 
 class TechnicalAnalysis(BaseModel):
     products: list[ProductAnalysis]
+    technical_requirements: list[TechnicalRequirement] = Field(default_factory=list)
     delivery_requirements: list[DeliveryRequirement]
     document_requirements: list[DocumentRequirement]
     risks_and_uncertainties: list[Risk]

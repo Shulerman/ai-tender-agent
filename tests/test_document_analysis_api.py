@@ -292,3 +292,99 @@ def test_requirements_reject_analysis_from_another_document(
             id=other_document.id
         ).delete(synchronize_session=False)
         db.commit()
+
+def test_api_returns_all_30_general_technical_requirements(
+    client,
+    db,
+    document_with_chunks,
+    monkeypatch,
+):
+    document, chunks = document_with_chunks
+
+    technical_requirements = []
+    quotes = []
+
+    for number in range(1, 31):
+        mandatory = number % 3 == 0
+        status = "обязательно" if mandatory else "справочно"
+        quote = (
+            f"Параметр {number:02d}: Значение {number:02d}; "
+            f"статус: {status}."
+        )
+        quotes.append(quote)
+        technical_requirements.append({
+            "name": f"Параметр {number:02d}",
+            "value": f"Значение {number:02d}",
+            "unit": None,
+            "operator": None,
+            "is_required": mandatory,
+            "description": "",
+            "quotes": [quote],
+            "evidence": [],
+            "evidence_status": "Не проверено",
+            "rejected_quotes": [],
+        })
+
+    chunks[0].text = (
+        chunks[0].text + "\n" + "\n".join(quotes)
+    )
+    db.commit()
+
+    async def fake_analyzer(document_text):
+        assert all(quote in document_text for quote in quotes)
+        return {
+            "products": [],
+            "technical_requirements": technical_requirements,
+            "delivery_requirements": [],
+            "document_requirements": [],
+            "risks_and_uncertainties": [],
+            "questions_to_customer": [],
+        }
+
+    monkeypatch.setattr(
+        analysis_service,
+        "analyze_technical_requirements",
+        fake_analyzer,
+    )
+
+    analysis_response = client.post(
+        f"/documents/{document.id}/analyze"
+    )
+    assert analysis_response.status_code == 200
+    analysis_result = analysis_response.json()
+    assert analysis_result["requirements_count"] == 30
+    assert analysis_result["requirements_with_source"] == 30
+
+    response = client.get(
+        f"/documents/{document.id}/requirements",
+        params={"analysis_id": analysis_result["analysis_id"]},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["document_id"] == document.id
+    assert payload["analysis_id"] == analysis_result["analysis_id"]
+
+    records = payload["requirements"]
+    assert len(records) == 30
+
+    for number, record in enumerate(records, start=1):
+        mandatory = number % 3 == 0
+        status = "обязательно" if mandatory else "справочно"
+        expected_quote = (
+            f"Параметр {number:02d}: Значение {number:02d}; "
+            f"статус: {status}."
+        )
+
+        assert record["requirement_type"] == "technical"
+        assert record["requirement_text"] == (
+            f"Параметр {number:02d}: Значение {number:02d}"
+        )
+        assert record["attributes"]["name"] == f"Параметр {number:02d}"
+        assert record["attributes"]["value"] == f"Значение {number:02d}"
+        assert record["attributes"]["is_required"] is mandatory
+        assert record["attributes"]["semantic_evidence_status"] == "Не проверено"
+        assert record["source_chunk_id"] == chunks[0].id
+        assert record["evidence_quote"] == expected_quote
+        assert record["extraction_status"] == "Источник найден"
+        assert record["confidence"] is None

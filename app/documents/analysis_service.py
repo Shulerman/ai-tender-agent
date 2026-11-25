@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+﻿from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -64,6 +64,21 @@ def _build_requirement_text(
     if requirement_type == "product":
         return item["name"].strip()
 
+    if requirement_type == "technical":
+        name = str(item.get("name") or "").strip()
+        description = str(item.get("description") or "").strip()
+        value = str(item.get("value") or "").strip()
+        operator = str(item.get("operator") or "").strip()
+        unit = str(item.get("unit") or "").strip()
+
+        if description:
+            return f"{name}: {description}" if name else description
+
+        value_parts = " ".join(
+            part for part in (operator, value, unit) if part
+        )
+        return f"{name}: {value_parts}" if value_parts else name
+
     if requirement_type == "delivery":
         parts = []
 
@@ -89,6 +104,28 @@ def _build_requirement_text(
     )
 
 
+def _semantic_evidence_status(item: dict) -> str:
+    """Сводит семантические статусы, не смешивая их с поиском источника."""
+
+    evidence_items = list(item.get("evidence") or [])
+    for attribute in item.get("attributes") or []:
+        if isinstance(attribute, dict):
+            evidence_items.extend(attribute.get("evidence") or [])
+
+    statuses = [
+        evidence.get("relevance_status")
+        for evidence in evidence_items
+        if isinstance(evidence, dict)
+    ]
+    if not statuses:
+        return "Не проверено"
+    if "Противоречит" in statuses:
+        return "Противоречит"
+    if all(status == "Подтверждает" for status in statuses):
+        return "Подтверждено"
+    return "Не подтверждено"
+
+
 def _build_requirement_records(
     analysis_result: dict,
     chunks: list[DocumentChunkDB],
@@ -99,6 +136,7 @@ def _build_requirement_records(
 
     sections = (
         ("product", "products"),
+        ("technical", "technical_requirements"),
         ("delivery", "delivery_requirements"),
         ("document", "document_requirements"),
         ("risk", "risks_and_uncertainties"),
@@ -149,7 +187,12 @@ def _build_requirement_records(
                     ),
                     requirement_type=requirement_type,
                     requirement_text=requirement_text,
-                    attributes=item,
+                    attributes={
+                        **item,
+                        "semantic_evidence_status": (
+                            _semantic_evidence_status(item)
+                        ),
+                    },
                     evidence_quote=evidence_quote,
                     confidence=None,
                     extraction_status=(

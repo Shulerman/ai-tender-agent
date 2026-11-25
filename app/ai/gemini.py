@@ -15,7 +15,6 @@ def is_gemini_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-
 GEMINI_MODEL = os.getenv(
     "GEMINI_MODEL",
     "gemini-3.5-flash-lite"
@@ -76,7 +75,14 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
                 )
 
                 response.raise_for_status()
-                result = response.json()
+
+                try:
+                    result = response.json()
+                except (ValueError, TypeError) as error:
+                    raise RuntimeError(
+                        "Gemini вернул некорректный JSON-ответ API"
+                    ) from error
+
                 break
 
             except httpx.HTTPStatusError as error:
@@ -90,9 +96,29 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
                     ) from error
 
                 if attempt == 2:
+                    retry_after = error.response.headers.get("Retry-After")
+                    request_id = (
+                        error.response.headers.get("x-request-id")
+                        or error.response.headers.get("request-id")
+                    )
+                    try:
+                        error_body = error.response.text[:500]
+                    except Exception:
+                        error_body = ""
+
+                    details = [
+                        f"HTTP {error.response.status_code}"
+                    ]
+                    if retry_after:
+                        details.append(f"Retry-After={retry_after}")
+                    if request_id:
+                        details.append(f"Request-ID={request_id}")
+                    if error_body:
+                        details.append(f"Ответ сервера: {error_body}")
+
                     raise RuntimeError(
-                        "Gemini временно недоступен после "
-                        "трёх попыток. Попробуйте позже."
+                        "Gemini временно недоступен после трёх попыток. "
+                        + "; ".join(details)
                     ) from error
 
             except (httpx.TimeoutException, httpx.NetworkError) as error:
@@ -105,15 +131,58 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
 
             await asyncio.sleep(2 ** attempt)
 
-    try:
-        text = result["candidates"][0]["content"]["parts"][0]["text"]
-
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Gemini вернул пустой текст")
-
-        return text
-
-    except (KeyError, IndexError, TypeError, ValueError) as error:
+    if not isinstance(result, dict):
         raise RuntimeError(
-            f"Gemini вернул неожиданный ответ: {result}"
-        ) from error
+            "Gemini вернул ответ неожиданной структуры"
+        )
+
+    candidates = result.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        raise RuntimeError(
+            "Gemini не вернул кандидатов с текстом ответа"
+        )
+
+    candidate = candidates[0]
+    if not isinstance(candidate, dict):
+        raise RuntimeError(
+            "Gemini вернул ответ неожиданной структуры"
+        )
+
+    finish_reason = candidate.get("finishReason")
+    if finish_reason != "STOP":
+        reason = finish_reason if isinstance(finish_reason, str) else "не указан"
+        raise RuntimeError(
+            "Gemini завершил генерацию без подтверждения полного ответа "
+            f"(finishReason={reason})"
+        )
+
+    content = candidate.get("content")
+    if not isinstance(content, dict):
+        raise RuntimeError(
+            "Gemini не вернул содержимое ответа"
+        )
+
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        raise RuntimeError(
+            "Gemini вернул ответ без списка текстовых частей"
+        )
+
+    text_parts = [
+        part["text"]
+        for part in parts
+        if (
+            isinstance(part, dict)
+            and isinstance(part.get("text"), str)
+            and part["text"].strip()
+        )
+    ]
+
+    text = "".join(text_parts)
+
+    if not text.strip():
+        raise RuntimeError(
+            "Gemini вернул пустой текст"
+        )
+
+    return text

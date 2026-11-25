@@ -4,6 +4,79 @@ from app.documents import doc_reader, extraction_service
 from app.documents.extraction_service import extract_document_content
 
 
+def test_real_pdf_table_rows_are_not_duplicated_in_page_text():
+    from pathlib import Path
+    from app.documents.pdf_reader import extract_pages_from_pdf
+
+    pdf_path = Path(__file__).parent / "tender_audit.pdf"
+    pages = extract_pages_from_pdf(str(pdf_path))
+
+    assert len(pages) == 3
+
+    page1 = pages[0]
+    page1_text = page1["text"]
+    page1_block = next(
+        block for block in page1["blocks"]
+        if block["locator_type"] == "page"
+    )
+    page1_metadata = page1_block["metadata_json"]
+
+    assert "P-001" not in page1_text
+    assert "2. Технические характеристики" in page1_text
+    assert page1_metadata["table_text_suppression"]["suppressed_table_numbers"] == [1, 2]
+
+    page1_rows = [
+        block["text"] for block in page1["blocks"]
+        if block["locator_type"] == "table_row"
+    ]
+    assert any("P-001" in row for row in page1_rows)
+
+    page2 = pages[1]
+    page2_text = page2["text"]
+    page2_block = next(
+        block for block in page2["blocks"]
+        if block["locator_type"] == "page"
+    )
+    page2_metadata = page2_block["metadata_json"]
+
+    assert "Поставка одной партией" in page2_text
+    assert "Документы передаются вместе с товаром" in page2_text
+    assert "Параметр 30" not in page2_text
+    assert page2_metadata["table_text_suppression"]["suppressed_table_numbers"] == [1]
+
+    page2_rows = [
+        block["text"] for block in page2["blocks"]
+        if block["locator_type"] == "table_row"
+    ]
+    assert any("Параметр 30" in row for row in page2_rows)
+
+    page3 = pages[2]
+    assert "Гарантийный срок" in page3["text"]
+    assert "Цена должна включать" in page3["text"]
+    page3_block = next(
+        block for block in page3["blocks"]
+        if block["locator_type"] == "page"
+    )
+    assert page3_block["metadata_json"]["table_text_suppression"]["suppressed_table_numbers"] == []
+
+
+def test_edge_pdf_without_detected_tables_keeps_native_text():
+    from pathlib import Path
+    from app.documents.pdf_reader import extract_pages_from_pdf
+
+    pdf_path = Path(__file__).parent / "edge.pdf"
+    pages = extract_pages_from_pdf(str(pdf_path))
+
+    assert len(pages) == 2
+    for page in pages:
+        assert page["text"] == page["native_text"]
+        page_block = next(
+            block for block in page["blocks"]
+            if block["locator_type"] == "page"
+        )
+        assert page_block["metadata_json"]["table_text_suppression"]["suppressed_table_numbers"] == []
+
+
 def test_pdf_extraction_preserves_page_locators(tmp_path, monkeypatch):
     path = tmp_path / "sample.pdf"
     path.write_bytes(b"%PDF-test")
