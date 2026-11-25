@@ -275,3 +275,35 @@ def test_generate_text_reports_http_retry_details(monkeypatch):
     assert "Request-ID=test-request-123" in message
     assert "backend temporarily unavailable" in message
     assert len(calls) == 3
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "expected_delay"),
+    [
+        ("7", 7),
+        ("not-a-number", 1),
+        ("120", 30),
+        ("-5", 1),
+    ],
+)
+def test_generate_text_uses_retry_after_header(
+    monkeypatch, retry_after, expected_delay
+):
+    response = FakeResponse(status_code=503)
+    response.headers = {"Retry-After": retry_after}
+    calls = install_fake_client(
+        monkeypatch,
+        [response, successful_response()],
+    )
+    delays = []
+
+    async def fake_sleep(seconds):
+        delays.append(seconds)
+
+    monkeypatch.setattr("app.ai.gemini.asyncio.sleep", fake_sleep)
+
+    result = asyncio.run(gemini.generate_text("test prompt"))
+
+    assert result == '{"ok": true}'
+    assert len(calls) == 2
+    assert delays == [expected_delay]

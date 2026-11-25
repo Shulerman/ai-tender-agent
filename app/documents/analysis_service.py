@@ -318,68 +318,101 @@ async def retry_semantic_validation(
 ) -> dict:
     """Повторяет только семантическую проверку сохранённого результата."""
 
-    analysis = (
+    # Атомарный захват до чтения результата: параллельный запрос не пройдёт.
+    claim = (
         db.query(TenderAnalysisDB)
         .filter(
             TenderAnalysisDB.id == analysis_id,
             TenderAnalysisDB.document_id == document_id,
+            TenderAnalysisDB.status == "Завершён",
+            TenderAnalysisDB.semantic_validation_status != "Выполняется",
         )
-        .first()
+        .update(
+            {TenderAnalysisDB.semantic_validation_status: "Выполняется"},
+            synchronize_session=False,
+        )
     )
 
-    if analysis is None:
-        raise ValueError("Анализ не найден")
-
-    if analysis.status != "Завершён":
-        raise ValueError("Основной анализ ещё не завершён")
-
-    if not isinstance(analysis.result_json, dict):
-        raise ValueError("У анализа отсутствует сохранённый результат")
-
-    technical_analysis = TechnicalAnalysis.model_validate(
-        analysis.result_json
-    )
-    original_result = technical_analysis.model_dump()
-    flattened = _flatten_requirement_items(original_result)
-
-    records = (
-        db.query(TenderRequirementDB)
-        .filter(
-            TenderRequirementDB.document_id == document_id,
-            TenderRequirementDB.analysis_id == analysis_id,
-        )
-        .order_by(TenderRequirementDB.id)
-        .all()
-    )
-
-    if len(records) != len(flattened):
-        raise ValueError(
-            "Количество сохранённых требований не совпадает с результатом анализа"
-        )
-
-    for record, (expected_type, _) in zip(records, flattened):
-        if record.requirement_type != expected_type:
-            raise ValueError(
-                "Порядок или тип сохранённых требований не совпадает "
-                "с результатом анализа"
+    if claim != 1:
+        db.rollback()
+        existing = (
+            db.query(TenderAnalysisDB)
+            .filter(
+                TenderAnalysisDB.id == analysis_id,
+                TenderAnalysisDB.document_id == document_id,
             )
+            .first()
+        )
+        if existing is None:
+            raise ValueError("Анализ не найден")
+        if existing.status != "Завершён":
+            raise ValueError("Основной анализ ещё не завершён")
+        if existing.semantic_validation_status == "Выполняется":
+            raise ValueError("Семантическая проверка уже выполняется")
+        raise ValueError("Не удалось захватить анализ для повторной проверки")
 
-    retry_count = _reset_failed_evidence(original_result)
-    if retry_count == 0:
-        return {
-            "analysis_id": analysis_id,
-            "document_id": document_id,
-            "semantic_validation_status": analysis.semantic_validation_status,
-            "retried_evidence_count": 0,
-            "message": "Нет доказательств с неудачной семантической проверкой",
-        }
-
-    technical_analysis = TechnicalAnalysis.model_validate(original_result)
+    db.commit()
+    db.expire_all()
 
     try:
-        analysis.semantic_validation_status = "Выполняется"
-        db.commit()
+        analysis = (
+            db.query(TenderAnalysisDB)
+            .filter(
+                TenderAnalysisDB.id == analysis_id,
+                TenderAnalysisDB.document_id == document_id,
+            )
+            .first()
+        )
 
+        if analysis is None:
+            raise ValueError("Анализ не найден")
+
+        if not isinstance(analysis.result_json, dict):
+            raise ValueError("У анализа отсутствует сохранённый результат")
+
+        technical_analysis = TechnicalAnalysis.model_validate(
+            analysis.result_json
+        )
+        original_result = technical_analysis.model_dump()
+        flattened = _flatten_requirement_items(original_result)
+
+        records = (
+            db.query(TenderRequirementDB)
+            .filter(
+                TenderRequirementDB.document_id == document_id,
+                TenderRequirementDB.analysis_id == analysis_id,
+            )
+            .order_by(TenderRequirementDB.id)
+            .all()
+        )
+
+        if len(records) != len(flattened):
+            raise ValueError(
+                "Количество сохранённых требований не совпадает с результатом анализа"
+            )
+
+        for record, (expected_type, _) in zip(records, flattened):
+            if record.requirement_type != expected_type:
+                raise ValueError(
+                    "Порядок или тип сохранённых требований не совпадает "
+                    "с результатом анализа"
+                )
+
+        retry_count = _reset_failed_evidence(original_result)
+        if retry_count == 0:
+            analysis.semantic_validation_status = (
+                _semantic_validation_status(original_result)
+            )
+            db.commit()
+            return {
+                "analysis_id": analysis_id,
+                "document_id": document_id,
+                "semantic_validation_status": analysis.semantic_validation_status,
+                "retried_evidence_count": 0,
+                "message": "Нет доказательств с неудачной семантической проверкой",
+            }
+
+        technical_analysis = TechnicalAnalysis.model_validate(original_result)
         await validate_evidence_relevance(technical_analysis)
 
         updated_result = technical_analysis.model_dump()
@@ -418,14 +451,11 @@ async def retry_semantic_validation(
 
     except Exception:
         db.rollback()
-
         failed_analysis = db.get(TenderAnalysisDB, analysis_id)
         if failed_analysis is not None:
             failed_analysis.semantic_validation_status = "Не выполнена"
             db.commit()
-
         raise
-
 
 
 async def analyze_and_save_document_requirements(

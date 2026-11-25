@@ -140,6 +140,7 @@ def test_run_matcher_api_returns_run_and_statistics(client, db):
     assert result["status"] == "Завершён"
     assert isinstance(result["statistics"], dict)
     assert result["statistics"]["requirements_total"] == 1
+    assert result["algorithm_version"] == "1.1"
 
 
 @pytest.mark.parametrize(
@@ -249,6 +250,7 @@ def test_matcher_api_returns_history_and_separates_match_types(client, db):
 
     history = history_response.json()
     assert len(history) == 2
+    assert all(item["algorithm_version"] == "1.1" for item in history)
     assert [item["id"] for item in history] == list(reversed(run_ids))
 
     matches_response = client.get(

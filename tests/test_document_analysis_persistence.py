@@ -1,4 +1,5 @@
 ﻿import asyncio
+import copy
 import uuid
 
 import pytest
@@ -451,6 +452,22 @@ def test_retry_semantic_validation_success_preserves_requirements(
 
     async def fake_validator(technical_analysis):
         validation_calls.append(True)
+
+        if len(validation_calls) == 2:
+            concurrent_db = SessionLocal()
+            try:
+                with pytest.raises(
+                    ValueError,
+                    match="Семантическая проверка уже выполняется",
+                ):
+                    await analysis_service.retry_semantic_validation(
+                        concurrent_db,
+                        document.id,
+                        analysis_id,
+                    )
+            finally:
+                concurrent_db.close()
+
         technical_analysis.technical_requirements[0].evidence[0].relevance_status = (
             "Подтверждает"
         )
@@ -539,6 +556,18 @@ def test_retry_semantic_validation_success_preserves_requirements(
         "Подтверждено"
     )
 
+    flattened_after = analysis_service._flatten_requirement_items(
+        analysis.result_json
+    )
+    assert len(flattened_after) == len(records_after)
+    for (expected_type, item), record in zip(flattened_after, records_after):
+        assert record.requirement_type == expected_type
+        expected_attributes = {
+            **item,
+            "semantic_evidence_status": analysis_service._semantic_evidence_status(item),
+        }
+        assert record.attributes == expected_attributes
+
     no_op = asyncio.run(
         analysis_service.retry_semantic_validation(
             db,
@@ -620,3 +649,166 @@ def test_retry_semantic_validation_failure_keeps_extraction_and_requirements(
         "Проверка не выполнена"
     )
     assert len(extraction_calls) == 1
+
+def test_retry_semantic_validation_exception_preserves_saved_data(
+    document_with_chunks,
+    monkeypatch,
+):
+    db, document, first_chunk, _ = document_with_chunks
+    validation_calls = []
+
+    async def fake_analyzer(document_text):
+        return _make_semantic_retry_test_result()
+
+    async def fake_validator(technical_analysis):
+        validation_calls.append(True)
+        raise RuntimeError("Тестовое исключение повторной проверки")
+
+    monkeypatch.setattr(
+        analysis_service,
+        "analyze_technical_requirements",
+        fake_analyzer,
+    )
+    monkeypatch.setattr(
+        analysis_service,
+        "validate_evidence_relevance",
+        fake_validator,
+    )
+
+    initial = asyncio.run(
+        analysis_service.analyze_and_save_document_requirements(
+            db,
+            document.id,
+        )
+    )
+    analysis_id = initial["analysis_id"]
+
+    analysis = db.get(TenderAnalysisDB, analysis_id)
+    record = (
+        db.query(TenderRequirementDB)
+        .filter_by(analysis_id=analysis_id)
+        .one()
+    )
+    original_result = copy.deepcopy(analysis.result_json)
+    original_attributes = copy.deepcopy(record.attributes)
+    original_record_id = record.id
+
+    with pytest.raises(
+        RuntimeError,
+        match="Тестовое исключение повторной проверки",
+    ):
+        asyncio.run(
+            analysis_service.retry_semantic_validation(
+                db,
+                document.id,
+                analysis_id,
+            )
+        )
+
+    db.expire_all()
+    analysis = db.get(TenderAnalysisDB, analysis_id)
+    record = (
+        db.query(TenderRequirementDB)
+        .filter_by(analysis_id=analysis_id)
+        .one()
+    )
+
+    assert len(validation_calls) == 1
+    assert analysis.status == "Завершён"
+    assert analysis.semantic_validation_status == "Не выполнена"
+    assert analysis.result_json == original_result
+    assert record.id == original_record_id
+    assert record.source_chunk_id == first_chunk.id
+    assert record.attributes == original_attributes
+
+
+def test_retry_semantic_validation_only_resets_failed_evidence(
+    document_with_chunks,
+    monkeypatch,
+):
+    db, document, _, _ = document_with_chunks
+    validation_calls = []
+    statuses_seen_on_retry = []
+
+    async def fake_analyzer(document_text):
+        result = _make_semantic_retry_test_result()
+        base_evidence = result["technical_requirements"][0]["evidence"][0]
+        statuses = [
+            "Проверка не выполнена",
+            "Противоречит",
+            "Недостаточно данных",
+            "Подтверждает",
+        ]
+        result["technical_requirements"][0]["evidence"] = [
+            {
+                **base_evidence,
+                "claim": f"Проверка {index + 1}",
+                "relevance_status": status,
+                "relevance_explanation": f"Исходный статус: {status}",
+            }
+            for index, status in enumerate(statuses)
+        ]
+        return result
+
+    async def fake_validator(technical_analysis):
+        validation_calls.append(True)
+        evidence_items = technical_analysis.technical_requirements[0].evidence
+        statuses_seen_on_retry.extend(
+            item.relevance_status for item in evidence_items
+        )
+
+        for item in evidence_items:
+            if item.relevance_status == "Ожидает проверки":
+                item.relevance_status = "Подтверждает"
+                item.relevance_explanation = "Повторная проверка выполнена."
+
+    monkeypatch.setattr(
+        analysis_service,
+        "analyze_technical_requirements",
+        fake_analyzer,
+    )
+    monkeypatch.setattr(
+        analysis_service,
+        "validate_evidence_relevance",
+        fake_validator,
+    )
+
+    initial = asyncio.run(
+        analysis_service.analyze_and_save_document_requirements(
+            db,
+            document.id,
+        )
+    )
+    analysis_id = initial["analysis_id"]
+
+    retried = asyncio.run(
+        analysis_service.retry_semantic_validation(
+            db,
+            document.id,
+            analysis_id,
+        )
+    )
+
+    db.expire_all()
+    analysis = db.get(TenderAnalysisDB, analysis_id)
+    final_statuses = [
+        item["relevance_status"]
+        for item in analysis.result_json["technical_requirements"][0]["evidence"]
+    ]
+
+    assert len(validation_calls) == 1
+    assert retried["retried_evidence_count"] == 1
+    assert statuses_seen_on_retry == [
+        "Ожидает проверки",
+        "Противоречит",
+        "Недостаточно данных",
+        "Подтверждает",
+    ]
+    assert final_statuses == [
+        "Подтверждает",
+        "Противоречит",
+        "Недостаточно данных",
+        "Подтверждает",
+    ]
+    assert retried["semantic_validation_status"] == "Завершена"
+    assert analysis.semantic_validation_status == "Завершена"

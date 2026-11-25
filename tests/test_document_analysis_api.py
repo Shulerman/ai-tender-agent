@@ -510,6 +510,36 @@ def test_retry_semantic_validation_api_success(
         "Подтверждено"
     )
 
+    persisted_analysis = db.get(TenderAnalysisDB, analysis_id)
+    assert persisted_analysis is not None
+    assert persisted_analysis.status == "Завершён"
+    assert after_response.json()["semantic_validation_status"] == (
+        persisted_analysis.semantic_validation_status
+    )
+
+    flattened = analysis_service._flatten_requirement_items(
+        persisted_analysis.result_json
+    )
+    db_records = (
+        db.query(TenderRequirementDB)
+        .filter_by(document_id=document.id, analysis_id=analysis_id)
+        .order_by(TenderRequirementDB.id)
+        .all()
+    )
+    assert len(flattened) == len(db_records) == len(after_records)
+    api_by_id = {item["id"]: item for item in after_records}
+    for (expected_type, item), record in zip(flattened, db_records):
+        assert record.requirement_type == expected_type
+        expected_attributes = {
+            **item,
+            "semantic_evidence_status": analysis_service._semantic_evidence_status(item),
+        }
+        assert record.attributes == expected_attributes
+        api_record = api_by_id[record.id]
+        assert api_record["attributes"] == record.attributes
+        assert api_record["source_chunk_id"] == record.source_chunk_id
+        assert api_record["evidence_quote"] == record.evidence_quote
+
 
 def test_retry_semantic_validation_api_rejects_unknown_analysis(
     client,

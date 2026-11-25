@@ -164,7 +164,7 @@ async def test_analyze_technical_requirements_runs_semantic_validation(
     )
 
 @pytest.mark.asyncio
-async def test_invalid_json_response_is_saved_to_temp(monkeypatch, tmp_path):
+async def test_invalid_json_response_is_not_saved(monkeypatch):
     from app.ai import technical_analyst
 
     raw_response = '  {"broken":  \n'
@@ -172,56 +172,36 @@ async def test_invalid_json_response_is_saved_to_temp(monkeypatch, tmp_path):
     async def fake_generate_text(prompt, json_mode=False):
         return raw_response
 
-    monkeypatch.setattr(
-        technical_analyst,
-        "generate_text",
-        fake_generate_text,
-    )
-    monkeypatch.setattr(
-        technical_analyst.tempfile,
-        "gettempdir",
-        lambda: str(tmp_path),
-    )
+    monkeypatch.setattr(technical_analyst, "generate_text", fake_generate_text)
 
     with pytest.raises(RuntimeError, match="некорректный JSON") as error:
         await technical_analyst.analyze_technical_requirements("Тестовый документ")
 
-    diagnostic_files = list(tmp_path.glob("gemini_json_error_*.txt"))
-    assert len(diagnostic_files) == 1
-    assert diagnostic_files[0].read_text(encoding="utf-8") == raw_response
-    assert str(diagnostic_files[0]) in str(error.value)
-    assert raw_response not in str(error.value)
-
+    message = str(error.value)
+    assert "строка" in message
+    assert "позиция" in message
+    assert "длина ответа:" in message
+    assert "gemini_json_error_" not in message
+    assert raw_response not in message
 
 @pytest.mark.asyncio
-async def test_invalid_json_diagnostic_write_failure_preserves_parse_error(
-    monkeypatch,
-):
+async def test_invalid_json_error_preserves_json_decode_cause(monkeypatch):
+    import json
+
     from app.ai import technical_analyst
 
+    raw_response = '{"broken":'
+
     async def fake_generate_text(prompt, json_mode=False):
-        return '{"broken":'
+        return raw_response
 
-    def fail_save(response_text):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(
-        technical_analyst,
-        "generate_text",
-        fake_generate_text,
-    )
-    monkeypatch.setattr(
-        technical_analyst,
-        "_save_invalid_json_response",
-        fail_save,
-    )
+    monkeypatch.setattr(technical_analyst, "generate_text", fake_generate_text)
 
     with pytest.raises(RuntimeError, match="некорректный JSON") as error:
         await technical_analyst.analyze_technical_requirements("Тестовый документ")
 
-    assert "не удалось создать диагностический файл" in str(error.value)
-    assert "disk full" not in str(error.value)
-
+    assert isinstance(error.value.__cause__, json.JSONDecodeError)
+    assert raw_response not in str(error.value)
 
 @pytest.mark.asyncio
 async def test_questions_to_customer_prompt_requires_json_strings(monkeypatch):

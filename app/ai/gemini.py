@@ -67,6 +67,8 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
 
         for attempt in range(3):
 
+            retry_delay = 2 ** attempt
+
             try:
                 response = await client.post(
                     GEMINI_URL,
@@ -95,8 +97,16 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
                         f"{error.response.status_code}"
                     ) from error
 
+                retry_after = error.response.headers.get("Retry-After")
+                if retry_after is not None:
+                    try:
+                        parsed_retry_after = int(retry_after.strip())
+                        if parsed_retry_after >= 0:
+                            retry_delay = min(parsed_retry_after, 30)
+                    except (AttributeError, TypeError, ValueError):
+                        pass
+
                 if attempt == 2:
-                    retry_after = error.response.headers.get("Retry-After")
                     request_id = (
                         error.response.headers.get("x-request-id")
                         or error.response.headers.get("request-id")
@@ -129,7 +139,7 @@ async def generate_text(prompt: str, json_mode: bool = False) -> str:
                         "после трёх попыток."
                     ) from error
 
-            await asyncio.sleep(2 ** attempt)
+            await asyncio.sleep(retry_delay)
 
     if not isinstance(result, dict):
         raise RuntimeError(

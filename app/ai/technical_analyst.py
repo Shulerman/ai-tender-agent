@@ -1,5 +1,4 @@
 ﻿import json
-import tempfile
 
 from pydantic import ValidationError
 
@@ -7,20 +6,6 @@ from app.ai.gemini import generate_text
 from app.ai.evidence_validator import validate_quotes
 from app.ai.evidence_relevance_validator import validate_evidence_relevance
 from app.ai.technical_models import TechnicalAnalysis
-
-
-def _save_invalid_json_response(response_text: str) -> str:
-    with tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        suffix=".txt",
-        prefix="gemini_json_error_",
-        dir=tempfile.gettempdir(),
-        delete=False,
-    ) as diagnostic_file:
-        diagnostic_file.write(response_text)
-
-    return diagnostic_file.name
 
 
 def validate_analysis_evidence(
@@ -404,19 +389,10 @@ description как точное содержание условия, value ос�
     try:
         parsed_result = json.loads(result)
     except json.JSONDecodeError as error:
-        try:
-            diagnostic_path = _save_invalid_json_response(raw_result)
-            diagnostic_detail = (
-                f"; исходный ответ сохранён в: {diagnostic_path}"
-            )
-        except OSError:
-            diagnostic_detail = (
-                "; не удалось создать диагностический файл в TEMP"
-            )
-
         raise RuntimeError(
-            f"Gemini вернул некорректный JSON: {error}"
-            f"{diagnostic_detail}"
+            "Gemini вернул некорректный JSON: "
+            f"{error.msg} (строка {error.lineno}, "
+            f"позиция {error.colno}, длина ответа: {len(raw_result)} символов)"
         ) from error
 
     try:

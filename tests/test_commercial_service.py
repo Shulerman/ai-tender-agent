@@ -1934,6 +1934,47 @@ def test_run_commercial_matcher_creates_full_match_and_preserves_evidence(
     ]
 
 
+def test_run_commercial_matcher_converts_standard_units_in_service(
+    db,
+    test_id,
+):
+    analysis = create_test_analysis(db)
+    tender = db.query(TenderDB).filter_by(
+        tender_id=analysis.tender_id
+    ).one()
+    _, tender_analysis, requirement = create_test_requirement(db, tender)
+
+    product, _ = upsert_product(
+        db,
+        {
+            "name": f"Товар с эквивалентной единицей-{test_id}",
+            "technical_attributes": {
+                "diameter": {"value": 1, "unit": "cm"},
+                "material": "steel",
+            },
+        },
+    )
+
+    run = run_commercial_matcher(
+        db,
+        analysis.id,
+        tender_analysis.id,
+    )
+
+    match = db.query(CommercialMatchDB).filter_by(
+        match_run_id=run.id,
+        product_id=product.id,
+        tender_requirement_id=requirement.id,
+    ).one()
+
+    confirmed = json.loads(match.confirmed_characteristics)
+
+    assert run.status == "Завершён"
+    assert run.algorithm_version == "1.1"
+    assert match.match_status == "Полное соответствие"
+    assert len(confirmed) == 2
+
+
 def test_run_commercial_matcher_separates_potential_analogues(
     db,
     test_id,

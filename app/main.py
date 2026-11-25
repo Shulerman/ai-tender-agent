@@ -250,7 +250,11 @@ async def retry_document_semantic_validation(
         message = str(exc)
         if message == "Анализ не найден":
             status_code = 404
-        elif message == "Основной анализ ещё не завершён":
+        elif message in (
+            "Основной анализ ещё не завершён",
+            "Семантическая проверка уже выполняется",
+            "Не удалось захватить анализ для повторной проверки",
+        ):
             status_code = 409
         else:
             status_code = 422

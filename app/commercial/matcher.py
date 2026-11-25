@@ -3,13 +3,48 @@
 import re
 from decimal import Decimal, InvalidOperation
 
+from app.commercial.unit_normalizer import get_unit_definition
 
-ALGORITHM_VERSION = "1.0"
+
+ALGORITHM_VERSION = "1.1"
+
+
+_NAME_ALIASES = {
+    # Диаметр без уточнения типа.
+    "diameter": "diameter",
+    "диаметр": "diameter",
+    "ø": "diameter",
+    "⌀": "diameter",
+
+    # Наружный и внутренний диаметры остаются разными характеристиками.
+    "outerdiameter": "outerdiameter",
+    "наружныйдиаметр": "outerdiameter",
+    "внешнийдиаметр": "outerdiameter",
+    "innerdiameter": "innerdiameter",
+    "внутреннийдиаметр": "innerdiameter",
+
+    "length": "length",
+    "длина": "length",
+    "width": "width",
+    "ширина": "width",
+    "height": "height",
+    "высота": "height",
+    "thickness": "thickness",
+    "толщина": "thickness",
+    "wallthickness": "wallthickness",
+    "толщинастенки": "wallthickness",
+}
 
 
 def _normalize_name(value):
-    """Нормализует название характеристики для поиска."""
-    return re.sub(r"[^a-zа-яё0-9]", "", str(value).casefold())
+    """Нормализует название характеристики с учётом явных синонимов."""
+    raw = str(value).casefold().strip()
+
+    if raw in ("ø", "⌀"):
+        return "diameter"
+
+    compact = re.sub(r"[^a-zа-яё0-9]", "", raw)
+    return _NAME_ALIASES.get(compact, compact)
 
 
 def _normalize_unit(value):
@@ -66,9 +101,26 @@ def _compare_values(required, actual, operator=None):
 
     required_unit = _normalize_unit(required_unit_value)
     actual_unit = _normalize_unit(actual_unit_value)
+    unit_conversion_factor = None
 
     if required_unit != actual_unit:
-        return None
+        if required_unit is None or actual_unit is None:
+            return None
+
+        required_definition = get_unit_definition(required_unit)
+        actual_definition = get_unit_definition(actual_unit)
+
+        if (
+            required_definition is None
+            or actual_definition is None
+            or required_definition[0] != actual_definition[0]
+        ):
+            return None
+
+        # Приводим фактическое значение к единице требования.
+        unit_conversion_factor = (
+            actual_definition[1] / required_definition[1]
+        )
 
     expected_value = required.get("value")
 
@@ -103,6 +155,11 @@ def _compare_values(required, actual, operator=None):
 
     expected_number = _as_decimal(expected_value)
     actual_number = _as_decimal(actual_value)
+
+    if unit_conversion_factor is not None:
+        if expected_number is None or actual_number is None:
+            return None
+        actual_number *= unit_conversion_factor
 
     if expected_number is not None and actual_number is not None:
         comparisons = {
@@ -155,8 +212,8 @@ def compare_product_to_requirement(requirement_attributes, product_attributes):
     """
     Сравнивает структурированные характеристики требования с характеристиками товара.
 
-    Не выполняет неявную конвертацию единиц измерения.
-    Неизвестные характеристики не считаются совпадающими.
+    Конвертирует известные стандартные единицы только внутри одной физической группы.
+    Неизвестные единицы и характеристики не считаются подтверждённым совпадением.
     """
     if not isinstance(requirement_attributes, list):
         requirement_attributes = []

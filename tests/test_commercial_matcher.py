@@ -56,15 +56,16 @@ def test_potential_analogue_with_numeric_discrepancy():
     assert result["discrepancies"][0]["actual_value"] == 12
 
 
-def test_different_units_are_not_automatically_converted():
+def test_equivalent_standard_units_are_converted():
     result = compare_product_to_requirement(
         [{"name": "diameter", "value": 10, "unit": "mm"}],
         {"diameter": {"value": 1, "unit": "cm"}},
     )
 
-    assert result["match_status"] == "Недостаточно данных"
-    assert result["confirmed_characteristics"] == []
-    assert len(result["missing_characteristics"]) == 1
+    assert result["match_status"] == "Полное соответствие"
+    assert result["is_candidate"] is True
+    assert result["match_score"] == 100.0
+    assert len(result["confirmed_characteristics"]) == 1
 
 
 def test_numeric_minimum_operator():
@@ -332,3 +333,71 @@ def test_numeric_string_and_number_still_match():
     )
     assert result["match_status"] == "Полное соответствие"
     assert result["match_score"] == 100.0
+
+
+def test_standard_mass_units_are_converted():
+    result = compare_product_to_requirement(
+        [{"name": "weight", "value": 1, "unit": "kg"}],
+        {"weight": {"value": 1000, "unit": "g"}},
+    )
+
+    assert result["match_status"] == "Полное соответствие"
+    assert result["match_score"] == 100.0
+    assert len(result["confirmed_characteristics"]) == 1
+
+
+def test_numeric_operator_works_after_unit_conversion():
+    result = compare_product_to_requirement(
+        [{
+            "name": "diameter",
+            "value": 10,
+            "unit": "mm",
+            "operator": ">=",
+        }],
+        {"diameter": {"value": 1.1, "unit": "cm"}},
+    )
+
+    assert result["match_status"] == "Полное соответствие"
+
+
+def test_units_from_different_families_are_not_converted():
+    result = compare_product_to_requirement(
+        [{"name": "capacity", "value": 10, "unit": "kg"}],
+        {"capacity": {"value": 10, "unit": "mm"}},
+    )
+
+    assert result["is_candidate"] is False
+    assert result["match_status"] == "Недостаточно данных"
+
+
+def test_explicit_characteristic_synonyms_are_matched():
+    result = compare_product_to_requirement(
+        [{"name": "диаметр", "value": 10, "unit": "mm"}],
+        {"Ø": {"value": 10, "unit": "mm"}},
+    )
+
+    assert result["match_status"] == "Полное соответствие"
+
+
+def test_outer_and_inner_diameters_are_not_synonyms():
+    result = compare_product_to_requirement(
+        [{"name": "внутренний диаметр", "value": 10, "unit": "mm"}],
+        {"наружный диаметр": {"value": 10, "unit": "mm"}},
+    )
+
+    assert result["is_candidate"] is False
+    assert result["match_status"] == "Недостаточно данных"
+
+
+def test_synonym_collision_remains_ambiguous():
+    result = compare_product_to_requirement(
+        [{"name": "диаметр", "value": 10, "unit": "mm"}],
+        {
+            "diameter": {"value": 10, "unit": "mm"},
+            "Ø": {"value": 10, "unit": "mm"},
+        },
+    )
+
+    assert result["is_candidate"] is False
+    assert result["confirmed_characteristics"] == []
+    assert "неоднозначные" in result["missing_characteristics"][0]["reason"]
