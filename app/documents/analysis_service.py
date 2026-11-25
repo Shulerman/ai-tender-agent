@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 
 from app.ai.evidence_validator import normalize_text
 from app.ai.technical_analyst import analyze_technical_requirements
+from app.ai.technical_models import TechnicalAnalysis
+from app.ai.evidence_relevance_validator import validate_evidence_relevance
 from app.documents.models import (
     DocumentChunkDB,
     TenderAnalysisDB,
@@ -206,6 +208,226 @@ def _build_requirement_records(
     return records
 
 
+def _flatten_requirement_items(result: dict) -> list[tuple[str, dict]]:
+    """Возвращает требования в том же порядке, в котором они сохраняются в БД."""
+
+    sections = (
+        ("product", "products"),
+        ("technical", "technical_requirements"),
+        ("delivery", "delivery_requirements"),
+        ("document", "document_requirements"),
+        ("risk", "risks_and_uncertainties"),
+    )
+    flattened = []
+
+    for requirement_type, section_name in sections:
+        items = result.get(section_name, [])
+        if not isinstance(items, list):
+            raise ValueError(f"Некорректный раздел анализа: {section_name}")
+
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError(
+                    f"Некорректная запись в разделе {section_name}"
+                )
+            flattened.append((requirement_type, item))
+
+    return flattened
+
+
+def _walk_evidence(value):
+    """Обходит evidence верхнего уровня и вложенные атрибуты."""
+
+    if isinstance(value, dict):
+        evidence_items = value.get("evidence")
+        if isinstance(evidence_items, list):
+            for evidence in evidence_items:
+                if isinstance(evidence, dict):
+                    yield evidence
+
+        for key, nested in value.items():
+            if key != "evidence":
+                yield from _walk_evidence(nested)
+
+    elif isinstance(value, list):
+        for item in value:
+            yield from _walk_evidence(item)
+
+
+def _semantic_validation_status(result: dict) -> str:
+    """Вычисляет общий статус только по результатам семантической проверки."""
+
+    statuses = [
+        item.get("relevance_status")
+        for item in _walk_evidence(result)
+        if isinstance(item.get("relevance_status"), str)
+        and item.get("relevance_status") != "Цитата не найдена"
+    ]
+
+    if not statuses:
+        return "Не требуется"
+
+    completed = sum(
+        status in {
+            "Подтверждает",
+            "Противоречит",
+            "Недостаточно данных",
+        }
+        for status in statuses
+    )
+    failed = statuses.count("Проверка не выполнена")
+    pending = len(statuses) - completed - failed
+
+    if failed and not completed and not pending:
+        return "Не выполнена"
+
+    if failed or (completed and pending):
+        return "Частично выполнена"
+
+    if completed == len(statuses):
+        return "Завершена"
+
+    return "Не запускалась"
+
+
+def _reset_failed_evidence(value) -> int:
+    """Возвращает только неудавшиеся проверки в очередь повторной проверки."""
+
+    reset_count = 0
+
+    if isinstance(value, dict):
+        if value.get("relevance_status") == "Проверка не выполнена":
+            value["relevance_status"] = "Ожидает проверки"
+            value["relevance_explanation"] = ""
+            reset_count += 1
+
+        for nested in value.values():
+            reset_count += _reset_failed_evidence(nested)
+
+    elif isinstance(value, list):
+        for item in value:
+            reset_count += _reset_failed_evidence(item)
+
+    return reset_count
+
+
+async def retry_semantic_validation(
+    db: Session,
+    document_id: int,
+    analysis_id: int,
+) -> dict:
+    """Повторяет только семантическую проверку сохранённого результата."""
+
+    analysis = (
+        db.query(TenderAnalysisDB)
+        .filter(
+            TenderAnalysisDB.id == analysis_id,
+            TenderAnalysisDB.document_id == document_id,
+        )
+        .first()
+    )
+
+    if analysis is None:
+        raise ValueError("Анализ не найден")
+
+    if analysis.status != "Завершён":
+        raise ValueError("Основной анализ ещё не завершён")
+
+    if not isinstance(analysis.result_json, dict):
+        raise ValueError("У анализа отсутствует сохранённый результат")
+
+    technical_analysis = TechnicalAnalysis.model_validate(
+        analysis.result_json
+    )
+    original_result = technical_analysis.model_dump()
+    flattened = _flatten_requirement_items(original_result)
+
+    records = (
+        db.query(TenderRequirementDB)
+        .filter(
+            TenderRequirementDB.document_id == document_id,
+            TenderRequirementDB.analysis_id == analysis_id,
+        )
+        .order_by(TenderRequirementDB.id)
+        .all()
+    )
+
+    if len(records) != len(flattened):
+        raise ValueError(
+            "Количество сохранённых требований не совпадает с результатом анализа"
+        )
+
+    for record, (expected_type, _) in zip(records, flattened):
+        if record.requirement_type != expected_type:
+            raise ValueError(
+                "Порядок или тип сохранённых требований не совпадает "
+                "с результатом анализа"
+            )
+
+    retry_count = _reset_failed_evidence(original_result)
+    if retry_count == 0:
+        return {
+            "analysis_id": analysis_id,
+            "document_id": document_id,
+            "semantic_validation_status": analysis.semantic_validation_status,
+            "retried_evidence_count": 0,
+            "message": "Нет доказательств с неудачной семантической проверкой",
+        }
+
+    technical_analysis = TechnicalAnalysis.model_validate(original_result)
+
+    try:
+        analysis.semantic_validation_status = "Выполняется"
+        db.commit()
+
+        await validate_evidence_relevance(technical_analysis)
+
+        updated_result = technical_analysis.model_dump()
+        updated_items = _flatten_requirement_items(updated_result)
+
+        if len(updated_items) != len(records):
+            raise ValueError(
+                "После проверки изменилось количество требований"
+            )
+
+        for record, (expected_type, item) in zip(records, updated_items):
+            if record.requirement_type != expected_type:
+                raise ValueError(
+                    "После проверки изменился порядок типов требований"
+                )
+
+            record.attributes = {
+                **item,
+                "semantic_evidence_status": _semantic_evidence_status(item),
+            }
+
+        analysis.result_json = updated_result
+        analysis.semantic_validation_status = (
+            _semantic_validation_status(updated_result)
+        )
+
+        db.commit()
+        db.refresh(analysis)
+
+        return {
+            "analysis_id": analysis_id,
+            "document_id": document_id,
+            "semantic_validation_status": analysis.semantic_validation_status,
+            "retried_evidence_count": retry_count,
+        }
+
+    except Exception:
+        db.rollback()
+
+        failed_analysis = db.get(TenderAnalysisDB, analysis_id)
+        if failed_analysis is not None:
+            failed_analysis.semantic_validation_status = "Не выполнена"
+            db.commit()
+
+        raise
+
+
+
 async def analyze_and_save_document_requirements(
     db: Session,
     document_id: int,
@@ -273,6 +495,9 @@ async def analyze_and_save_document_requirements(
         db.add_all(records)
 
         analysis.result_json = result
+        analysis.semantic_validation_status = (
+            _semantic_validation_status(result)
+        )
         analysis.status = "Завершён"
         analysis.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
 

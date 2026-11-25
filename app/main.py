@@ -29,6 +29,7 @@ from app.documents.models import (
 )
 from app.documents.analysis_service import (
     analyze_and_save_document_requirements,
+    retry_semantic_validation,
 )
 
 from app.ai.gemini import is_gemini_enabled
@@ -229,6 +230,39 @@ async def analyze_document(
         )
 
 
+
+
+@app.post(
+    "/documents/{document_id}/analyses/{analysis_id}/retry-semantic-validation"
+)
+async def retry_document_semantic_validation(
+    document_id: int,
+    analysis_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        return await retry_semantic_validation(
+            db=db,
+            document_id=document_id,
+            analysis_id=analysis_id,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if message == "Анализ не найден":
+            status_code = 404
+        elif message == "Основной анализ ещё не завершён":
+            status_code = 409
+        else:
+            status_code = 422
+
+        raise HTTPException(status_code=status_code, detail=message)
+    except Exception:
+        raise HTTPException(
+            status_code=502,
+            detail="Ошибка повторной семантической проверки",
+        )
+
+
 @app.get("/documents/{document_id}/requirements")
 def get_document_requirements(
     document_id: int,
@@ -277,6 +311,7 @@ def get_document_requirements(
         return {
             "document_id": document_id,
             "analysis_id": None,
+            "semantic_validation_status": None,
             "requirements": [],
         }
 
@@ -293,6 +328,7 @@ def get_document_requirements(
     return {
         "document_id": document_id,
         "analysis_id": analysis.id,
+        "semantic_validation_status": analysis.semantic_validation_status,
         "requirements": [
             {
                 "id": item.id,

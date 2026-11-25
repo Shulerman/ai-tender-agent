@@ -388,3 +388,163 @@ def test_api_returns_all_30_general_technical_requirements(
         assert record["evidence_quote"] == expected_quote
         assert record["extraction_status"] == "Источник найден"
         assert record["confidence"] is None
+
+
+def _api_semantic_retry_result():
+    quote = "Технические требования к тестовому товару."
+    return {
+        "products": [],
+        "technical_requirements": [
+            {
+                "name": "Материал корпуса",
+                "value": "Сталь",
+                "unit": None,
+                "operator": None,
+                "is_required": True,
+                "description": "",
+                "quotes": [quote],
+                "evidence": [
+                    {
+                        "claim": "Корпус изготовлен из стали",
+                        "quote": quote,
+                        "relevance_status": "Проверка не выполнена",
+                        "relevance_explanation": "Первичная проверка не удалась.",
+                    }
+                ],
+                "evidence_status": "Не проверено",
+                "rejected_quotes": [],
+            }
+        ],
+        "delivery_requirements": [],
+        "document_requirements": [],
+        "risks_and_uncertainties": [],
+        "questions_to_customer": [],
+    }
+
+
+def test_retry_semantic_validation_api_success(
+    client,
+    db,
+    document_with_chunks,
+    monkeypatch,
+):
+    document, chunks = document_with_chunks
+    extraction_calls = []
+    validation_calls = []
+
+    async def fake_analyzer(document_text):
+        extraction_calls.append(document_text)
+        return _api_semantic_retry_result()
+
+    async def fake_validator(technical_analysis):
+        validation_calls.append(True)
+        evidence = technical_analysis.technical_requirements[0].evidence[0]
+        evidence.relevance_status = "Подтверждает"
+        evidence.relevance_explanation = "Цитата подтверждает требование."
+
+    monkeypatch.setattr(
+        analysis_service,
+        "analyze_technical_requirements",
+        fake_analyzer,
+    )
+    monkeypatch.setattr(
+        analysis_service,
+        "validate_evidence_relevance",
+        fake_validator,
+    )
+
+    analysis_response = client.post(
+        f"/documents/{document.id}/analyze"
+    )
+    assert analysis_response.status_code == 200
+    analysis_id = analysis_response.json()["analysis_id"]
+
+    before_response = client.get(
+        f"/documents/{document.id}/requirements",
+        params={"analysis_id": analysis_id},
+    )
+    assert before_response.status_code == 200
+    before_records = before_response.json()["requirements"]
+    assert len(before_records) == 1
+
+    original_id = before_records[0]["id"]
+    original_chunk_id = before_records[0]["source_chunk_id"]
+    assert original_chunk_id == chunks[0].id
+
+    async def extraction_must_not_run(document_text):
+        raise AssertionError("Retry must not run document extraction")
+
+    monkeypatch.setattr(
+        analysis_service,
+        "analyze_technical_requirements",
+        extraction_must_not_run,
+    )
+
+    retry_response = client.post(
+        f"/documents/{document.id}/analyses/{analysis_id}/retry-semantic-validation"
+    )
+
+    assert retry_response.status_code == 200
+    retry_payload = retry_response.json()
+    assert retry_payload["analysis_id"] == analysis_id
+    assert retry_payload["document_id"] == document.id
+    assert retry_payload["semantic_validation_status"] == "Завершена"
+    assert retry_payload["retried_evidence_count"] == 1
+    assert len(extraction_calls) == 1
+    assert len(validation_calls) == 1
+
+    after_response = client.get(
+        f"/documents/{document.id}/requirements",
+        params={"analysis_id": analysis_id},
+    )
+    assert after_response.status_code == 200
+    after_records = after_response.json()["requirements"]
+
+    assert len(after_records) == 1
+    assert after_records[0]["id"] == original_id
+    assert after_records[0]["source_chunk_id"] == original_chunk_id
+    assert after_records[0]["attributes"]["evidence"][0][
+        "relevance_status"
+    ] == "Подтверждает"
+    assert after_records[0]["attributes"]["semantic_evidence_status"] == (
+        "Подтверждено"
+    )
+
+
+def test_retry_semantic_validation_api_rejects_unknown_analysis(
+    client,
+    document_with_chunks,
+):
+    document, _ = document_with_chunks
+
+    response = client.post(
+        f"/documents/{document.id}/analyses/999999999/retry-semantic-validation"
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Анализ не найден"
+
+
+def test_retry_semantic_validation_api_rejects_incomplete_analysis(
+    client,
+    db,
+    document_with_chunks,
+):
+    document, _ = document_with_chunks
+
+    analysis = TenderAnalysisDB(
+        document_id=document.id,
+        analysis_type="technical_requirements",
+        status="Выполняется",
+        result_json={},
+    )
+    db.add(analysis)
+    db.commit()
+    db.refresh(analysis)
+
+    response = client.post(
+        f"/documents/{document.id}/analyses/{analysis.id}/retry-semantic-validation"
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Основной анализ ещё не завершён"

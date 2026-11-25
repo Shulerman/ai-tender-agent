@@ -40,7 +40,7 @@ try {
     }
 
     Write-Host "`n===== RUNNING REGRESSION TESTS =====" -ForegroundColor Cyan
-    python -m pytest -q
+    python -m pytest -q tests --ignore-glob=*.backup_*.py
     if ($LASTEXITCODE -ne 0) {
         throw "Regression tests failed."
     }

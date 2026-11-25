@@ -126,6 +126,12 @@ class TenderAnalysisDB(Base):
         index=True,
     )
 
+    semantic_validation_status = Column(
+        String(30),
+        nullable=False,
+        default="Не запускалась",
+        server_default="Не запускалась",
+    )
     result_json = Column(JSON, nullable=True)
     error = Column(Text, nullable=True)
 

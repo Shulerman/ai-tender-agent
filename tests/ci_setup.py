@@ -68,7 +68,7 @@ def main():
             "Сначала выполните: python -m alembic upgrade head"
         ) from exc
 
-    expected_revision = "28d979223ef8"
+    expected_revision = "b7c4e9a1d602"
     if revision != expected_revision:
         raise RuntimeError(
             f"Неверная ревизия БД: {revision!r}; "

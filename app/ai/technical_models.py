@@ -1,17 +1,21 @@
-﻿from pydantic import BaseModel, Field, model_validator
+﻿from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 NOT_SPECIFIED = "Не указано"
 EVIDENCE_NOT_CHECKED = "Не проверено"
 
 
-class Evidence(BaseModel):
+class TechnicalBaseModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class Evidence(TechnicalBaseModel):
     claim: str
     quote: str
     relevance_status: str = EVIDENCE_NOT_CHECKED
     relevance_explanation: str = ""
 
 
-class ProductAttribute(BaseModel):
+class ProductAttribute(TechnicalBaseModel):
     """Одна извлечённая техническая характеристика товара."""
 
     name: str
@@ -22,7 +26,7 @@ class ProductAttribute(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
 
 
-class ProductAnalysis(BaseModel):
+class ProductAnalysis(TechnicalBaseModel):
     name: str
     quantity: str
     unit: str
@@ -36,7 +40,7 @@ class ProductAnalysis(BaseModel):
     rejected_quotes: list[str] = Field(default_factory=list)
 
 
-class TechnicalRequirement(BaseModel):
+class TechnicalRequirement(TechnicalBaseModel):
     """Общее техническое требование, не привязанное к одной позиции товара."""
 
     name: str
@@ -51,7 +55,7 @@ class TechnicalRequirement(BaseModel):
     rejected_quotes: list[str] = Field(default_factory=list)
 
 
-class DeliveryRequirement(BaseModel):
+class DeliveryRequirement(TechnicalBaseModel):
     delivery_time: str = NOT_SPECIFIED
     delivery_address: str = NOT_SPECIFIED
     quotes: list[str] = Field(default_factory=list)
@@ -60,7 +64,7 @@ class DeliveryRequirement(BaseModel):
     rejected_quotes: list[str] = Field(default_factory=list)
 
 
-class DocumentRequirement(BaseModel):
+class DocumentRequirement(TechnicalBaseModel):
     requirement_type: str
     quotes: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
@@ -77,7 +81,7 @@ class DocumentRequirement(BaseModel):
         return value
 
 
-class Risk(BaseModel):
+class Risk(TechnicalBaseModel):
     description: str
     quotes: list[str] = Field(default_factory=list)
     evidence: list[Evidence] = Field(default_factory=list)
@@ -95,7 +99,7 @@ class Risk(BaseModel):
         return value
 
 
-class TechnicalAnalysis(BaseModel):
+class TechnicalAnalysis(TechnicalBaseModel):
     products: list[ProductAnalysis]
     technical_requirements: list[TechnicalRequirement] = Field(default_factory=list)
     delivery_requirements: list[DeliveryRequirement]
