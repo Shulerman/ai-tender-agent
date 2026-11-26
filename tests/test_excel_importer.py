@@ -342,3 +342,66 @@ def test_header_row_rejects_invalid_values(value):
     with pytest.raises(ValueError):
         _validate_header_row(value)
 
+
+
+def test_supplier_and_catalog_articles_are_parsed_independently(tmp_path):
+    from openpyxl import Workbook
+
+    file_path = tmp_path / "separate_articles.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append([
+        "Артикул поставщика",
+        "Артикул",
+        "Наименование",
+        "Цена",
+    ])
+    worksheet.append([
+        "SUP-001",
+        "CAT-001",
+        "Тестовый товар",
+        125,
+    ])
+    workbook.save(file_path)
+    workbook.close()
+
+    result = parse_price_list(
+        file_path,
+        column_mapping={
+            "supplier_article_number": 1,
+            "article_number": 2,
+            "name": 3,
+            "price": 4,
+        },
+    )
+
+    assert result["imported_count"] == 1
+    item = result["items"][0]
+    assert item["source_article_number"] == "SUP-001"
+    assert item["article_number"] == "CAT-001"
+
+
+def test_legacy_article_column_is_used_for_both_article_fields(tmp_path):
+    from openpyxl import Workbook
+
+    file_path = tmp_path / "legacy_article.xlsx"
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.append(["Артикул", "Наименование", "Цена"])
+    worksheet.append(["A-100", "Тестовый товар", 125])
+    workbook.save(file_path)
+    workbook.close()
+
+    result = parse_price_list(
+        file_path,
+        column_mapping={
+            "article_number": 1,
+            "name": 2,
+            "price": 3,
+        },
+    )
+
+    assert result["imported_count"] == 1
+    item = result["items"][0]
+    assert item["article_number"] == "A-100"
+    assert item["source_article_number"] == "A-100"

@@ -361,10 +361,17 @@ def import_price_list(
                     column_mapping,
                     "name",
                 ),
-                source_article_number=_get_mapped_value(
-                    raw_values,
-                    column_mapping,
-                    "article_number",
+                source_article_number=(
+                    _get_mapped_value(
+                        raw_values,
+                        column_mapping,
+                        "supplier_article_number",
+                    )
+                    or _get_mapped_value(
+                        raw_values,
+                        column_mapping,
+                        "article_number",
+                    )
                 ),
                 price=None,
                 currency=None,

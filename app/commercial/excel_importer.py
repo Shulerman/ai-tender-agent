@@ -25,6 +25,13 @@ FIELD_ALIASES = {
         "article",
         "part number",
     ],
+    "supplier_article_number": [
+        "артикул поставщика",
+        "код поставщика",
+        "supplier article",
+        "supplier article number",
+        "supplier sku",
+    ],
     "price": [
         "цена",
         "стоимость",
@@ -487,6 +494,20 @@ def parse_price_list(
                     column_mapping.get("article_number"),
                 )
 
+                supplier_article_number = _get_cell_value(
+                    row,
+                    column_mapping.get("supplier_article_number"),
+                )
+
+                source_article_number = (
+                    supplier_article_number
+                    if (
+                        supplier_article_number is not None
+                        and str(supplier_article_number).strip()
+                    )
+                    else article_number
+                )
+
                 unit = _get_cell_value(
                     row,
                     column_mapping.get("unit"),
@@ -551,8 +572,8 @@ def parse_price_list(
                     "source_file": path.name,
                     "source_name": str(name_value).strip(),
                     "source_article_number": (
-                        str(article_number).strip()
-                        if article_number is not None
+                        str(source_article_number).strip()
+                        if source_article_number is not None
                         else None
                     ),
                     "name": str(name_value).strip(),

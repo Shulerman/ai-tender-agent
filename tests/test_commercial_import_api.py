@@ -14,6 +14,7 @@ from app.commercial.models import (
     ManufacturerDB,
     PriceListImportDB,
     PriceListImportRowDB,
+    SupplierProductMappingDB,
     SupplierOfferDB,
     SupplierOfferVerificationDB,
     ProductDuplicateReviewDB,
@@ -466,6 +467,154 @@ def test_get_unmatched_import_rows_api(
     assert row["unit"] == "шт."
     assert row["status"] == "Требует сопоставления"
 
+
+def test_api_supplier_product_mapping_reused_on_reimport(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    token = uuid.uuid4().hex
+    supplier = SupplierDB(name=f"Mapping API supplier {token}")
+    product = ProductDB(
+        name=f"Catalog product {token}",
+        article_number=f"CAT-{token}",
+        created_at=datetime.now(),
+    )
+    db.add_all([supplier, product])
+    db.commit()
+    db.refresh(supplier)
+    db.refresh(product)
+
+    monkeypatch.setattr(
+        main_module,
+        "COMMERCIAL_PRICE_LISTS_DIR",
+        tmp_path,
+    )
+
+    supplier_article = f"  SUP-  A-001-{token}  "
+    normalized_supplier_article = f"sup- a-001-{token}"
+    column_mapping = {
+        "article_number": 1,
+        "supplier_article_number": 2,
+        "name": 3,
+        "price": 4,
+        "currency": 5,
+        "unit": 6,
+    }
+
+    def upload(name, price, filename):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Прайс"
+        sheet.append([
+            "Артикул",
+            "Артикул поставщика",
+            "Наименование",
+            "Цена",
+            "Валюта",
+            "Ед. изм.",
+        ])
+        sheet.append([
+            None,
+            supplier_article,
+            name,
+            price,
+            "RUB",
+            "шт.",
+        ])
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+
+        return client.post(
+            "/commercial/imports/excel",
+            data={
+                "supplier_id": str(supplier.id),
+                "column_mapping": json.dumps(
+                    column_mapping,
+                    ensure_ascii=False,
+                ),
+                "header_row": "1",
+                "sheet_name": "Прайс",
+            },
+            files={
+                "file": (
+                    filename,
+                    buffer.getvalue(),
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            },
+        )
+
+    first_response = upload(
+        f"Первое наименование {token}",
+        150,
+        "mapping-first.xlsx",
+    )
+    assert first_response.status_code == 200, first_response.text
+    first_import_id = first_response.json()["result"]["import_id"]
+
+    first_row = db.query(PriceListImportRowDB).filter_by(
+        import_id=first_import_id,
+    ).one()
+    assert first_row.source_article_number.strip() == supplier_article.strip()
+    assert first_row.status == "Требует сопоставления"
+    assert first_row.product_id is None
+
+    manual_match_response = client.post(
+        f"/commercial/imports/{first_import_id}/rows/{first_row.id}/match",
+        json={"product_id": product.id},
+    )
+    assert manual_match_response.status_code == 200, manual_match_response.text
+
+    mapping = db.query(SupplierProductMappingDB).filter_by(
+        supplier_id=supplier.id,
+        normalized_supplier_article_number=normalized_supplier_article,
+    ).one()
+    assert mapping.product_id == product.id
+
+    first_offer = db.query(SupplierOfferDB).filter_by(
+        supplier_id=supplier.id,
+        import_id=first_import_id,
+        product_id=product.id,
+    ).one()
+    assert first_offer.price == 150
+
+    second_response = upload(
+        f"Обновлённое наименование {token}",
+        175,
+        "mapping-second.xlsx",
+    )
+    assert second_response.status_code == 200, second_response.text
+    second_import_id = second_response.json()["result"]["import_id"]
+    assert second_import_id != first_import_id
+
+    second_row = db.query(PriceListImportRowDB).filter_by(
+        import_id=second_import_id,
+    ).one()
+    assert second_row.source_article_number.strip() == supplier_article.strip()
+    assert second_row.status == "Сопоставлен"
+    assert second_row.product_id == product.id
+
+    offers = (
+        db.query(SupplierOfferDB)
+        .filter(
+            SupplierOfferDB.supplier_id == supplier.id,
+            SupplierOfferDB.product_id == product.id,
+            SupplierOfferDB.import_id.in_([
+                first_import_id,
+                second_import_id,
+            ]),
+        )
+        .order_by(SupplierOfferDB.import_id)
+        .all()
+    )
+    assert len(offers) == 2
+    assert sorted(offer.price for offer in offers) == [150, 175]
+    assert {offer.import_id for offer in offers} == {
+        first_import_id,
+        second_import_id,
+    }
 
 def test_manual_match_api(
     client,
