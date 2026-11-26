@@ -13,6 +13,61 @@ $ErrorActionPreference = "Stop"
 $previewOnly = ($Command -eq "smart-preview")
 if ($previewOnly) { $Command = "smart" }
 
+function Invoke-PreparedTargetedTests {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$TestPaths
+    )
+
+    $previousEnvironment = @{
+        DATABASE_URL = $env:DATABASE_URL
+        POSTGRES_PASSWORD = $env:POSTGRES_PASSWORD
+        PYTHONPATH = $env:PYTHONPATH
+        GEMINI_ENABLED = $env:GEMINI_ENABLED
+    }
+
+    $testDatabase = "ci_targeted_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')_$PID.db"
+    $testExitCode = 0
+
+    try {
+        $env:DATABASE_URL = "sqlite:///./$testDatabase"
+        $env:POSTGRES_PASSWORD = "ci-test-only"
+        $env:PYTHONPATH = "."
+        $env:GEMINI_ENABLED = "false"
+
+        Write-Host "`nTest database: $testDatabase" -ForegroundColor DarkGray
+
+        Write-Host "`n===== APPLYING DATABASE MIGRATIONS =====" -ForegroundColor Cyan
+        python -m alembic upgrade head
+        if ($LASTEXITCODE -ne 0) {
+            throw "Database migrations failed."
+        }
+
+        Write-Host "`n===== PREPARING TEST DATABASE =====" -ForegroundColor Cyan
+        python tests/ci_setup.py
+        if ($LASTEXITCODE -ne 0) {
+            throw "Database preparation failed."
+        }
+
+        Write-Host "`n===== RUNNING SELECTED TESTS =====" -ForegroundColor Cyan
+        python -m pytest -q @TestPaths
+        $testExitCode = $LASTEXITCODE
+    }
+    finally {
+        foreach ($name in $previousEnvironment.Keys) {
+            if ($null -eq $previousEnvironment[$name]) {
+                Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item "Env:$name" $previousEnvironment[$name]
+            }
+        }
+    }
+
+    if ($testExitCode -ne 0) {
+        throw "Selected tests failed with exit code $testExitCode."
+    }
+}
 Push-Location $PSScriptRoot
 
 try {
@@ -137,41 +192,29 @@ try {
                 }
             }
 
-            $previousEnvironment = @{
-                DATABASE_URL = $env:DATABASE_URL
-                POSTGRES_PASSWORD = $env:POSTGRES_PASSWORD
-                PYTHONPATH = $env:PYTHONPATH
-            }
-
-            try {
-                $env:DATABASE_URL = "sqlite:///./ci_test.db"
-                $env:POSTGRES_PASSWORD = "ci-test-only"
-                $env:PYTHONPATH = "."
-
-                python -m pytest -q @Paths
-                $testExitCode = $LASTEXITCODE
-            }
-            finally {
-                foreach ($name in $previousEnvironment.Keys) {
-                    if ($null -eq $previousEnvironment[$name]) {
-                        Remove-Item "Env:$name" -ErrorAction SilentlyContinue
-                    }
-                    else {
-                        Set-Item "Env:$name" $previousEnvironment[$name]
-                    }
-                }
-            }
-
-            if ($testExitCode -ne 0) {
-                throw "Selected tests failed."
-            }
+            Invoke-PreparedTargetedTests -TestPaths $Paths
         }
-
         "smart" {
-            $changedFiles = @(& git.exe diff --name-only HEAD)
+            $trackedChanged = @(& git.exe diff --name-only HEAD)
             if ($LASTEXITCODE -ne 0) {
-                throw "Could not detect changed files."
+                throw "Could not detect tracked changes."
             }
+
+            $untrackedCandidates = @(& git.exe ls-files --others --exclude-standard -- app tests)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Could not detect untracked application and test files."
+            }
+
+            $untrackedCode = @(
+                $untrackedCandidates | Where-Object {
+                    ($_ -match '^app/.+\.py$') -or ($_ -match '^tests/test_[^/]+\.py$')
+                }
+            )
+
+            $allChangedFiles = @()
+            $allChangedFiles += $trackedChanged
+            $allChangedFiles += $untrackedCode
+            $changedFiles = @($allChangedFiles | Sort-Object -Unique)
 
             $selectedTests = @()
             $fullRequired = ($changedFiles.Count -eq 0)
@@ -180,7 +223,12 @@ try {
                 $path = $file.Replace('\', '/')
 
                 if ($path -match '^tests/test_[^/]+\.py$') {
-                    $selectedTests += $path
+                    if (Test-Path -LiteralPath $path -PathType Leaf) {
+                        $selectedTests += $path
+                    }
+                    else {
+                        $fullRequired = $true
+                    }
                     continue
                 }
 
@@ -242,18 +290,23 @@ try {
 
             if ($previewOnly) {
                 Write-Host "`n===== SMART PREVIEW =====" -ForegroundColor Cyan
-                Write-Host "Changed files:"
-                if ($changedFiles.Count -eq 0) { Write-Host "  No tracked changes detected." }
-                else { $changedFiles | ForEach-Object { Write-Host "  $_" } }
+                Write-Host "Changed tracked files and new source/test files:"
+                if ($changedFiles.Count -eq 0) {
+                    Write-Host "  No relevant changes detected."
+                }
+                else {
+                    $changedFiles | ForEach-Object { Write-Host "  $_" }
+                }
 
                 if ($fullRequired -or $selectedTests.Count -eq 0) {
                     Write-Host "`nPlanned action: FULL REGRESSION" -ForegroundColor Yellow
-                    Write-Host "Reason: no safe targeted mapping exists for at least one changed file, or no changes were detected."
+                    Write-Host "Reason: no safe targeted mapping exists, a selected test was deleted, or no relevant changes were detected."
                 }
                 else {
                     $selectedTests = @($selectedTests | Sort-Object -Unique)
                     Write-Host "`nPlanned action: SELECTED TESTS" -ForegroundColor Green
                     $selectedTests | ForEach-Object { Write-Host "  $_" }
+                    Write-Host "Database: new isolated SQLite database; migrations and ci_setup will run first."
                 }
                 break
             }
@@ -271,34 +324,7 @@ try {
                 Write-Host "`n===== SMART: SELECTED TESTS =====" -ForegroundColor Cyan
                 $selectedTests | ForEach-Object { Write-Host "  $_" }
 
-                $previousEnvironment = @{
-                    DATABASE_URL = $env:DATABASE_URL
-                    POSTGRES_PASSWORD = $env:POSTGRES_PASSWORD
-                    PYTHONPATH = $env:PYTHONPATH
-                }
-
-                try {
-                    $env:DATABASE_URL = "sqlite:///./ci_test.db"
-                    $env:POSTGRES_PASSWORD = "ci-test-only"
-                    $env:PYTHONPATH = "."
-
-                    python -m pytest -q @selectedTests
-                    $smartExitCode = $LASTEXITCODE
-                }
-                finally {
-                    foreach ($name in $previousEnvironment.Keys) {
-                        if ($null -eq $previousEnvironment[$name]) {
-                            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
-                        }
-                        else {
-                            Set-Item "Env:$name" $previousEnvironment[$name]
-                        }
-                    }
-                }
-
-                if ($smartExitCode -ne 0) {
-                    throw "Selected tests failed."
-                }
+                Invoke-PreparedTargetedTests -TestPaths $selectedTests
             }
         }
         "full" {
