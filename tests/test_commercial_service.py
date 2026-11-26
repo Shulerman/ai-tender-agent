@@ -1361,6 +1361,59 @@ def test_compare_supplier_offers_ranks_by_total_cost(db, test_id):
     assert result["ranked_offers"][1]["landed_total"] == Decimal("1500")
 
 
+def test_compare_supplier_offers_excludes_non_rub_currency(db, test_id):
+    from app.commercial.service import compare_supplier_offers
+
+    product, _ = upsert_product(
+        db, {"name": f"Товар валютной проверки-{test_id}", "unit": "шт."}
+    )
+    supplier_rub, _ = upsert_supplier(
+        db, {"name": f"Поставщик RUB-{test_id}"}
+    )
+    supplier_usd, _ = upsert_supplier(
+        db, {"name": f"Поставщик USD-{test_id}"}
+    )
+
+    rub_offer = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_rub.id,
+            "product_id": product.id,
+            "price": Decimal("100"),
+            "currency": "RUB",
+            "unit": "шт.",
+            "available_quantity": Decimal("20"),
+            "delivery_cost": Decimal("0"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+    usd_offer = create_supplier_offer(
+        db,
+        {
+            "supplier_id": supplier_usd.id,
+            "product_id": product.id,
+            "price": Decimal("25"),
+            "currency": "USD",
+            "unit": "шт.",
+            "available_quantity": Decimal("20"),
+            "delivery_cost": Decimal("0"),
+            "received_at": datetime.now(),
+            "source_type": "manual",
+        },
+    )
+
+    result = compare_supplier_offers(db, product.id, Decimal("10"))
+
+    assert [item["offer"].id for item in result["ranked_offers"]] == [rub_offer.id]
+    assert result["expired_offers"] == []
+    assert len(result["unranked_offers"]) == 1
+    excluded = result["unranked_offers"][0]
+    assert excluded["offer"].id == usd_offer.id
+    assert excluded["offer"].price == Decimal("25")
+    assert excluded["offer"].currency == "USD"
+    assert "RUB" in excluded["reason"]
+
 def test_compare_supplier_offers_does_not_rank_unknown_delivery_or_quantity(
     db,
     test_id,

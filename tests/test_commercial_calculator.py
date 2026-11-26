@@ -201,13 +201,16 @@ def test_zero_contract_revenue_does_not_cause_division_by_zero():
     assert result["gross_margin_percent"] is None
 
 
-def test_empty_items_are_rejected():
-    with pytest.raises(ValueError):
-        calculate_commercial_result(
-            contract_revenue=10000,
-            items=[],
-            additional_costs=500,
-        )
+def test_empty_items_are_incomplete():
+    result = calculate_commercial_result(
+        contract_revenue=10000,
+        items=[],
+        additional_costs=500,
+    )
+
+    assert result["calculation_status"] == "incomplete"
+    assert result["total_purchase_cost"] is None
+    assert "Не добавлены позиции для расчёта" in result["missing_data"]
 
 
 def test_invalid_price_verified_type_is_rejected():
@@ -241,3 +244,39 @@ def test_unknown_item_fields_are_rejected():
             ],
             additional_costs=500,
         )
+
+def test_line_total_is_used_instead_of_quantity_times_unit_price():
+    result = calculate_commercial_result(
+        contract_revenue=5000,
+        items=[{
+            "name": "Товар с доставкой",
+            "quantity": 10,
+            "unit_price": 150,
+            "line_total": 1600,
+            "price_verified": True,
+        }],
+        additional_costs=100,
+    )
+
+    assert result["total_purchase_cost"] == Decimal("1600")
+    assert result["gross_profit"] == Decimal("3300")
+    assert result["calculation_status"] == "complete"
+
+
+def test_explicit_missing_line_total_does_not_fall_back_to_unit_price():
+    result = calculate_commercial_result(
+        contract_revenue=5000,
+        items=[{
+            "name": "Товар без полной стоимости",
+            "quantity": 10,
+            "unit_price": 150,
+            "line_total": None,
+            "price_verified": True,
+        }],
+        additional_costs=100,
+    )
+
+    assert result["calculation_status"] == "incomplete"
+    assert result["total_purchase_cost"] is None
+    assert result["known_purchase_cost"] == Decimal("0")
+    assert any("полная стоимость" in item for item in result["missing_data"])

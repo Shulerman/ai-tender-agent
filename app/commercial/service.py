@@ -1255,6 +1255,9 @@ def compare_supplier_offers(
                 "freshness_warning": freshness_warning,
             })
 
+        if str(offer.currency or "").strip().upper() != "RUB":
+            add_unranked("Валюта предложения не RUB; конвертация не поддерживается")
+            continue
         if not offer.unit:
             add_unranked("У предложения не указана единица измерения")
             continue

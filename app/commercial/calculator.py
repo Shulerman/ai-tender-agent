@@ -54,7 +54,7 @@ def calculate_commercial_result(
     не рассчитываются.
     """
 
-    if not isinstance(items, list) or not items:
+    if not isinstance(items, list):
         raise ValueError("Необходимо передать список товаров")
 
     if additional_costs is not None:
@@ -83,6 +83,7 @@ def calculate_commercial_result(
             "name",
             "quantity",
             "unit_price",
+            "line_total",
             "price_verified",
         }
 
@@ -97,6 +98,8 @@ def calculate_commercial_result(
         name = item.get("name") or f"Позиция {index + 1}"
         quantity = item.get("quantity")
         unit_price = item.get("unit_price")
+        has_line_total = "line_total" in item
+        line_total = item.get("line_total")
         price_verified = item.get("price_verified")
 
         if quantity is None:
@@ -113,19 +116,37 @@ def calculate_commercial_result(
             f"{name}.quantity",
         )
 
-        if unit_price is None:
-            missing_data.append(f"{name}: неизвестна цена")
-            processed_items.append({
-                "name": name,
-                "status": "incomplete",
-                "total": None,
-            })
-            continue
+        if has_line_total:
+            if line_total is None:
+                missing_data.append(
+                    f"{name}: неизвестна полная стоимость позиции"
+                )
+                processed_items.append({
+                    "name": name,
+                    "status": "incomplete",
+                    "total": None,
+                })
+                continue
 
-        unit_price = _validate_non_negative(
-            unit_price,
-            f"{name}.unit_price",
-        )
+            item_total = _validate_non_negative(
+                line_total,
+                f"{name}.line_total",
+            )
+        else:
+            if unit_price is None:
+                missing_data.append(f"{name}: неизвестна цена")
+                processed_items.append({
+                    "name": name,
+                    "status": "incomplete",
+                    "total": None,
+                })
+                continue
+
+            unit_price = _validate_non_negative(
+                unit_price,
+                f"{name}.unit_price",
+            )
+            item_total = quantity * unit_price
 
         if not isinstance(price_verified, bool):
             raise ValueError(
@@ -143,7 +164,6 @@ def calculate_commercial_result(
             })
             continue
 
-        item_total = quantity * unit_price
         known_purchase_cost += item_total
 
         processed_items.append({
@@ -158,7 +178,10 @@ def calculate_commercial_result(
     if additional_costs is None:
         missing_data.append("Не определены дополнительные расходы")
 
-    all_items_confirmed = all(
+    if not processed_items:
+        missing_data.append("Не добавлены позиции для расчёта")
+
+    all_items_confirmed = bool(processed_items) and all(
         item["status"] == "confirmed"
         for item in processed_items
     )

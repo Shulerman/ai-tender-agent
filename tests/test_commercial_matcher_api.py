@@ -683,3 +683,98 @@ def test_excel_imported_catalog_product_is_used_by_matcher_api(
 
     assert match.match_status == "Полное соответствие"
     assert response.json()["statistics"]["matches_created"] >= 1
+
+def test_calculate_commercial_analysis_uses_confirmed_landed_total(client, db):
+    analysis, match, offer = _create_match_with_offer(
+        db,
+        verification_status="Подтверждено",
+    )
+    selected = client.put(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offer",
+        json={"offer_id": offer.id},
+    )
+    assert selected.status_code == 200
+
+    response = client.post(
+        f"/commercial/analyses/{analysis.id}/calculate",
+        json={"contract_revenue": 5000, "additional_costs": 100},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["calculation_status"] == "complete"
+    assert float(result["total_purchase_cost"]) == 1600
+    assert float(result["gross_profit"]) == 3300
+    assert result["status"] == "Завершён"
+
+    db.refresh(analysis)
+    assert float(analysis.total_purchase_cost) == 1600
+    assert float(analysis.gross_profit) == 3300
+    assert analysis.completed_at is not None
+
+
+def test_calculate_commercial_analysis_excludes_unverified_offer(client, db):
+    analysis, match, offer = _create_match_with_offer(
+        db,
+        verification_status="Не проверено",
+    )
+    selected = client.put(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offer",
+        json={"offer_id": offer.id},
+    )
+    assert selected.status_code == 200
+
+    response = client.post(
+        f"/commercial/analyses/{analysis.id}/calculate",
+        json={"contract_revenue": 5000, "additional_costs": 100},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["calculation_status"] == "incomplete"
+    assert result["total_purchase_cost"] is None
+    assert result["known_purchase_cost"] == 0
+    assert result["status"] == "Не завершён"
+    assert any("не подтверждена" in item for item in result["missing_data"])
+
+    db.refresh(analysis)
+    assert analysis.total_purchase_cost is None
+    assert analysis.completed_at is None
+
+
+def test_calculate_commercial_analysis_requires_landed_total(client, db):
+    analysis, match, offer = _create_match_with_offer(
+        db,
+        verification_status="Подтверждено",
+    )
+    selected = client.put(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/offer",
+        json={"offer_id": offer.id},
+    )
+    assert selected.status_code == 200
+
+    match.estimated_total_price = None
+    db.commit()
+
+    response = client.post(
+        f"/commercial/analyses/{analysis.id}/calculate",
+        json={"contract_revenue": 5000, "additional_costs": 100},
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["calculation_status"] == "incomplete"
+    assert result["total_purchase_cost"] is None
+    assert any("полная стоимость" in item for item in result["missing_data"])
+
+
+def test_calculate_commercial_analysis_validates_payload_and_analysis(client):
+    assert client.post(
+        "/commercial/analyses/999999/calculate",
+        json={"contract_revenue": 1000, "additional_costs": 0},
+    ).status_code == 404
+
+    assert client.post(
+        "/commercial/analyses/1/calculate",
+        json={"contract_revenue": 1000},
+    ).status_code == 422

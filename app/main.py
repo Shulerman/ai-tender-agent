@@ -57,6 +57,7 @@ from app.commercial.import_service import (
     import_price_list,
     match_import_row,
 )
+from app.commercial.calculator import calculate_commercial_result
 from app.commercial.service import (
     get_all_supplier_offers,
     get_current_supplier_offers,
@@ -1423,6 +1424,105 @@ def _run_commercial_matcher_api(
         raise HTTPException(status_code=status_code, detail=message)
 
     return _matcher_run_payload(run)
+
+
+@app.post("/commercial/analyses/{analysis_id}/calculate")
+def calculate_commercial_analysis_endpoint(
+    analysis_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Рассчитывает экономику анализа по выбранным предложениям."""
+
+    if not isinstance(payload, dict) or set(payload) != {
+        "contract_revenue",
+        "additional_costs",
+    }:
+        raise HTTPException(
+            status_code=422,
+            detail="Ожидаются поля contract_revenue и additional_costs",
+        )
+
+    analysis = db.get(CommercialAnalysisDB, analysis_id)
+    if analysis is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Коммерческий анализ не найден",
+        )
+
+    matches = (
+        db.query(CommercialMatchDB)
+        .filter(CommercialMatchDB.analysis_id == analysis_id)
+        .order_by(CommercialMatchDB.id)
+        .all()
+    )
+
+    items = []
+    for match in matches:
+        product = db.get(ProductDB, match.product_id) if match.product_id else None
+        offer = db.get(SupplierOfferDB, match.offer_id) if match.offer_id else None
+
+        match_currency = str(match.currency or "").strip().upper()
+        offer_currency = (
+            str(offer.currency or "").strip().upper()
+            if offer is not None
+            else ""
+        )
+        price_verified = (
+            offer is not None
+            and offer.verification_status == "Подтверждено"
+            and offer_currency == "RUB"
+            and match_currency == "RUB"
+        )
+
+        items.append({
+            "name": (
+                product.name
+                if product is not None
+                else match.tender_requirement or f"Сопоставление {match.id}"
+            ),
+            "quantity": match.estimated_quantity,
+            "unit_price": match.estimated_unit_price,
+            "line_total": match.estimated_total_price,
+            "price_verified": price_verified,
+        })
+
+    try:
+        result = calculate_commercial_result(
+            contract_revenue=payload["contract_revenue"],
+            items=items,
+            additional_costs=payload["additional_costs"],
+        )
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    analysis.contract_revenue = result["contract_revenue"]
+    analysis.additional_costs = result["additional_costs"]
+    analysis.total_purchase_cost = result["total_purchase_cost"]
+    analysis.gross_profit = result["gross_profit"]
+    analysis.gross_margin_percent = result["gross_margin_percent"]
+    analysis.data_completeness = result["data_completeness"]
+    analysis.status = (
+        "Завершён"
+        if result["calculation_status"] == "complete"
+        else "Не завершён"
+    )
+    analysis.completed_at = (
+        datetime.now()
+        if result["calculation_status"] == "complete"
+        else None
+    )
+    analysis.currency = "RUB"
+
+    db.commit()
+    db.refresh(analysis)
+
+    return {
+        "analysis_id": analysis.id,
+        **result,
+        "status": analysis.status,
+        "completed_at": analysis.completed_at,
+    }
 
 
 @app.post("/commercial/analyses/{analysis_id}/matches/run")
