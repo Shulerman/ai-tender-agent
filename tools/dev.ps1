@@ -29,7 +29,7 @@ function Invoke-PreparedTargetedTests {
         GEMINI_ENABLED = $env:GEMINI_ENABLED
     }
 
-    $testDatabase = "ci_targeted_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')_$PID.db"
+    $testDatabase = "ci_targeted_$([guid]::NewGuid().ToString('N')).db"
     $testExitCode = 0
 
     try {
@@ -262,9 +262,17 @@ print(json.dumps({"matches": matches}, ensure_ascii=False))
                 throw "Specify at least one test path. Example: .\dev.ps1 test tests/test_commercial_import_api.py"
             }
 
+            $testsRoot = [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot "tests")).TrimEnd('\', '/') +
+                [System.IO.Path]::DirectorySeparatorChar
+
             foreach ($path in $Paths) {
-                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-                    throw "Test file not found: $path"
+                $resolvedTest = (Resolve-Path -LiteralPath $path -ErrorAction Stop).Path
+                if (-not (Test-Path -LiteralPath $resolvedTest -PathType Leaf)) {
+                    throw "Test path is not a file: $path"
+                }
+                if ([System.IO.Path]::GetExtension($resolvedTest) -ne ".py" -or
+                    -not $resolvedTest.StartsWith($testsRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    throw "Only Python test files inside tests/ are allowed: $path"
                 }
             }
 

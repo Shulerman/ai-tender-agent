@@ -15,7 +15,7 @@ Push-Location $ProjectRoot
 try {
     Write-Host "`n===== CONFIGURING TEST ENVIRONMENT =====" -ForegroundColor Cyan
 
-    $testDatabase = "ci_test_runner_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff').db"
+    $testDatabase = "ci_test_runner_$([guid]::NewGuid().ToString('N')).db"
     $env:DATABASE_URL = "sqlite:///./$testDatabase"
     Write-Host "Test database: $testDatabase" -ForegroundColor DarkGray
     $env:POSTGRES_PASSWORD = "ci-test-only"

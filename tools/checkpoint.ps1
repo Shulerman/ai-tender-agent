@@ -11,6 +11,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Reset-SelectedPaths {
+    param([string[]]$Pathspecs)
+
+    & git reset -- $Pathspecs
+    $resetExitCode = $LASTEXITCODE
+
+    $remainingStaged = @(& git diff --cached --name-only)
+    $queryExitCode = $LASTEXITCODE
+
+    if ($resetExitCode -ne 0 -or $queryExitCode -ne 0 -or $remainingStaged.Count -gt 0) {
+        $remaining = if ($remainingStaged.Count -gt 0) {
+            $remainingStaged -join ", "
+        } else {
+            "(could not verify)"
+        }
+        throw "Git index cleanup could not be verified. Reset: $resetExitCode; query: $queryExitCode; remaining: $remaining"
+    }
+}
 try {
     $repoRoot = (& git rev-parse --show-toplevel 2>&1).ToString().Trim()
     if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
@@ -82,13 +100,13 @@ try {
     $addExitCode = $LASTEXITCODE
 
     if ($addExitCode -ne 0) {
-        & git reset -- $literalPathspecs
+        Reset-SelectedPaths -Pathspecs $literalPathspecs
         throw "Не удалось добавить выбранные файлы. Индекс очищен от выбранных файлов."
     }
 
     $actual = @(& git diff --cached --name-only)
     if ($LASTEXITCODE -ne 0) {
-        & git reset -- $literalPathspecs
+        Reset-SelectedPaths -Pathspecs $literalPathspecs
         throw "Не удалось проверить подготовленные изменения."
     }
 
@@ -97,7 +115,7 @@ try {
 
     $difference = Compare-Object -ReferenceObject $expectedSorted -DifferenceObject $actualSorted
     if ($difference) {
-        & git reset -- $literalPathspecs
+        Reset-SelectedPaths -Pathspecs $literalPathspecs
         throw "Список подготовленных файлов отличается от запрошенного. Коммит отменён."
     }
 
@@ -107,20 +125,20 @@ try {
     Write-Host "`nСводка изменений:" -ForegroundColor Cyan
     & git diff --cached --stat
     if ($LASTEXITCODE -ne 0) {
-        & git reset -- $literalPathspecs
+        Reset-SelectedPaths -Pathspecs $literalPathspecs
         throw "Не удалось показать сводку изменений."
     }
 
     & git diff --cached --check
     if ($LASTEXITCODE -ne 0) {
-        & git reset -- $literalPathspecs
+        Reset-SelectedPaths -Pathspecs $literalPathspecs
         throw "Обнаружены проблемы с пробелами или форматированием. Коммит отменён."
     }
 
     $answer = Read-Host "`nСоздать локальный коммит '$Message'? (y/N)"
 
     if ($answer -notin @("y", "Y", "yes", "YES")) {
-        & git reset -- $literalPathspecs
+        Reset-SelectedPaths -Pathspecs $literalPathspecs
         Write-Host "Коммит отменён. Изменения в рабочих файлах сохранены." -ForegroundColor Yellow
         return
     }
