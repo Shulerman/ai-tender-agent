@@ -127,6 +127,7 @@ def test_import_matches_product_by_article(
     ).one()
 
     assert row.product_id == product.id
+    assert row.offer_id == offer.id
     assert row.status == "Сопоставлен"
     assert offer.product_id == product.id
     assert offer.unit == "упаковка"
@@ -399,6 +400,7 @@ def test_manual_match_creates_supplier_offer(
     assert offers[0].currency == "RUB"
     assert offers[0].unit == "шт."
     assert offers[0].verification_status == "Не проверено"
+    assert import_row.offer_id == offers[0].id
 
 
 def test_manual_match_rejects_unknown_product(

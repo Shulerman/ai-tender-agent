@@ -346,6 +346,8 @@ def import_price_list(
             )
 
             db.add(offer)
+            db.flush([offer])
+            import_row.offer_id = offer.id
             created_offers += 1
 
         for error_item in errors:
@@ -527,6 +529,8 @@ def match_import_row(
         import_row.error = None
 
         db.add(offer)
+        db.flush([offer])
+        import_row.offer_id = offer.id
         db.commit()
         db.refresh(offer)
         db.refresh(import_row)

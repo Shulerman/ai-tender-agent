@@ -6,6 +6,10 @@
 Не предназначены для юридического анализа.
 """
 
+from pathlib import Path
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+
 from sqlalchemy import text
 
 from app.database import (
@@ -68,7 +72,12 @@ def main():
             "Сначала выполните: python -m alembic upgrade head"
         ) from exc
 
-    expected_revision = "b7c4e9a1d602"
+    alembic_config = Config(
+        str(Path(__file__).resolve().parents[1] / "alembic.ini")
+    )
+    expected_revision = ScriptDirectory.from_config(
+        alembic_config
+    ).get_current_head()
     if revision != expected_revision:
         raise RuntimeError(
             f"Неверная ревизия БД: {revision!r}; "

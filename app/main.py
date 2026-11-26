@@ -39,6 +39,7 @@ from app.ai.full_analyst import analyze_full_tender
 
 from app.commercial.models import (
     SupplierDB,
+    SupplierProductMappingDB,
     ProductDB,
     ManufacturerDB,
     PriceListImportDB,
@@ -1076,6 +1077,63 @@ def manually_match_import_row(
         "message": "Строка успешно сопоставлена",
         "result": result,
     }
+
+@app.put("/commercial/suppliers/{supplier_id}/product-mappings/{mapping_id}")
+def reassign_supplier_product_mapping(
+    supplier_id: int,
+    mapping_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    """Явно переназначает артикул поставщика на товар каталога."""
+
+    if payload.get("confirm_reassignment") is not True:
+        raise HTTPException(
+            status_code=422,
+            detail="Для переназначения требуется confirm_reassignment=true",
+        )
+
+    product_id = payload.get("product_id")
+    if not isinstance(product_id, int) or isinstance(product_id, bool):
+        raise HTTPException(
+            status_code=422,
+            detail="product_id должен быть целым числом",
+        )
+
+    mapping = (
+        db.query(SupplierProductMappingDB)
+        .filter_by(id=mapping_id, supplier_id=supplier_id)
+        .first()
+    )
+    if mapping is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Связь артикула поставщика не найдена",
+        )
+
+    product = db.get(ProductDB, product_id)
+    if product is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Товар каталога не найден",
+        )
+
+    try:
+        mapping.product_id = product.id
+        mapping.updated_at = datetime.now()
+        db.commit()
+        db.refresh(mapping)
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "supplier_id": mapping.supplier_id,
+        "mapping_id": mapping.id,
+        "product_id": mapping.product_id,
+        "updated_at": mapping.updated_at,
+    }
+
 
 @app.post("/tenders")
 def create_tender(

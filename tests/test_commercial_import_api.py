@@ -666,6 +666,7 @@ def test_manual_match_api(
     assert offer.price == 150
     assert offer.currency == "RUB"
     assert offer.verification_status == "Не проверено"
+    assert import_row.offer_id == offer.id
 
 
 def test_manual_match_api_rejects_repeated_match(
@@ -1590,3 +1591,160 @@ def test_product_duplicate_review_api_lifecycle(client, db):
     db.refresh(second)
     assert first.name == f"Товар A {token}"
     assert second.name == f"Товар B {token}"
+
+
+def test_supplier_product_mapping_reassignment_preserves_import_row(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    supplier, import_id, import_row = create_unmatched_import(
+        client, db, tmp_path, monkeypatch
+    )
+
+    old_product = ProductDB(
+        name=f"Исходный товар {uuid.uuid4().hex}",
+        created_at=datetime.now(),
+    )
+    new_product = ProductDB(
+        name=f"Новый товар {uuid.uuid4().hex}",
+        created_at=datetime.now(),
+    )
+    db.add_all([old_product, new_product])
+    db.commit()
+    db.refresh(old_product)
+    db.refresh(new_product)
+
+    mapping = SupplierProductMappingDB(
+        supplier_id=supplier.id,
+        supplier_article_number=import_row.source_article_number,
+        normalized_supplier_article_number=str(
+            import_row.source_article_number
+        ).strip().upper(),
+        product_id=old_product.id,
+        supplier_product_name=import_row.source_name,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    db.add(mapping)
+    db.commit()
+    db.refresh(mapping)
+
+    original_row = (
+        import_row.product_id,
+        import_row.status,
+        import_row.error,
+        import_row.source_article_number,
+    )
+
+    response = client.put(
+        f"/commercial/suppliers/{supplier.id}/product-mappings/{mapping.id}",
+        json={
+            "product_id": new_product.id,
+            "confirm_reassignment": True,
+        },
+    )
+
+    assert response.status_code == 200
+    db.refresh(mapping)
+    db.refresh(import_row)
+
+    assert mapping.product_id == new_product.id
+    assert (
+        import_row.product_id,
+        import_row.status,
+        import_row.error,
+        import_row.source_article_number,
+    ) == original_row
+
+
+def test_supplier_product_mapping_reassignment_requires_confirmation(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    supplier, _, import_row = create_unmatched_import(
+        client, db, tmp_path, monkeypatch
+    )
+    product_a = ProductDB(name=f"A-{uuid.uuid4().hex}", created_at=datetime.now())
+    product_b = ProductDB(name=f"B-{uuid.uuid4().hex}", created_at=datetime.now())
+    db.add_all([product_a, product_b])
+    db.commit()
+    db.refresh(product_a)
+    db.refresh(product_b)
+
+    mapping = SupplierProductMappingDB(
+        supplier_id=supplier.id,
+        supplier_article_number=import_row.source_article_number,
+        normalized_supplier_article_number=str(
+            import_row.source_article_number
+        ).strip().upper(),
+        product_id=product_a.id,
+        supplier_product_name=import_row.source_name,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    db.add(mapping)
+    db.commit()
+    db.refresh(mapping)
+
+    response = client.put(
+        f"/commercial/suppliers/{supplier.id}/product-mappings/{mapping.id}",
+        json={"product_id": product_b.id, "confirm_reassignment": False},
+    )
+
+    assert response.status_code == 422
+    db.refresh(mapping)
+    assert mapping.product_id == product_a.id
+
+
+def test_supplier_product_mapping_reassignment_checks_supplier_and_product(
+    client,
+    db,
+    tmp_path,
+    monkeypatch,
+):
+    supplier, _, import_row = create_unmatched_import(
+        client, db, tmp_path, monkeypatch
+    )
+    other_supplier = SupplierDB(
+        name=f"Другой поставщик {uuid.uuid4().hex}",
+        created_at=datetime.now(),
+    )
+    product = ProductDB(
+        name=f"Целевой товар {uuid.uuid4().hex}",
+        created_at=datetime.now(),
+    )
+    db.add_all([other_supplier, product])
+    db.commit()
+    db.refresh(other_supplier)
+    db.refresh(product)
+
+    mapping = SupplierProductMappingDB(
+        supplier_id=supplier.id,
+        supplier_article_number=import_row.source_article_number,
+        normalized_supplier_article_number=str(
+            import_row.source_article_number
+        ).strip().upper(),
+        product_id=product.id,
+        supplier_product_name=import_row.source_name,
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    db.add(mapping)
+    db.commit()
+    db.refresh(mapping)
+
+    wrong_supplier = client.put(
+        f"/commercial/suppliers/{other_supplier.id}/product-mappings/{mapping.id}",
+        json={"product_id": product.id, "confirm_reassignment": True},
+    )
+    missing_product = client.put(
+        f"/commercial/suppliers/{supplier.id}/product-mappings/{mapping.id}",
+        json={"product_id": 2147483000, "confirm_reassignment": True},
+    )
+
+    assert wrong_supplier.status_code == 404
+    assert missing_product.status_code == 404

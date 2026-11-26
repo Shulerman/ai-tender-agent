@@ -249,6 +249,13 @@ class PriceListImportRowDB(Base):
         index=True,
     )
 
+    offer_id = Column(
+        Integer,
+        ForeignKey("supplier_offers.id"),
+        nullable=True,
+        index=True,
+    )
+
     status = Column(
         String,
         nullable=False,
