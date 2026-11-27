@@ -46,6 +46,7 @@ from app.commercial.models import (
     PriceListImportRowDB,
     SupplierOfferDB,
     SupplierOfferVerificationDB,
+    CommercialMatchEvidenceVerificationDB,
     CommercialAnalysisDB,
     CommercialMatchRunDB,
     CommercialMatchDB,
@@ -63,6 +64,8 @@ from app.commercial.service import (
     get_all_supplier_offers,
     get_current_supplier_offers,
     verify_supplier_offer,
+    verify_commercial_match_evidence,
+    get_commercial_match_evidence_verifications,
     run_commercial_matcher,
     compare_supplier_offers,
 )
@@ -2225,3 +2228,72 @@ def get_commercial_offer_verifications(
         for item in verifications
     ]
 
+@app.post("/commercial/analyses/{analysis_id}/matches/{match_id}/evidence-verification")
+def create_commercial_match_evidence_verification(
+    analysis_id: int,
+    match_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+):
+    allowed = {"verification_status", "verified_by", "basis", "evidence_reference", "notes"}
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        raise HTTPException(status_code=422, detail="Недопустимые поля запроса")
+    for field in ("verification_status", "verified_by", "basis"):
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(status_code=422, detail=f"{field} обязателен")
+    if payload["verification_status"] not in {"Подтверждено", "Отклонено"}:
+        raise HTTPException(status_code=422, detail="Недопустимый статус проверки")
+    for field in ("evidence_reference", "notes"):
+        if payload.get(field) is not None and not isinstance(payload[field], str):
+            raise HTTPException(status_code=422, detail=f"{field} должен быть строкой")
+    try:
+        item = verify_commercial_match_evidence(
+            db=db,
+            analysis_id=analysis_id,
+            match_id=match_id,
+            verification_status=payload["verification_status"],
+            verified_by=payload["verified_by"],
+            basis=payload["basis"],
+            evidence_reference=payload.get("evidence_reference"),
+            notes=payload.get("notes"),
+        )
+    except ValueError as exc:
+        if "не найдено" in str(exc).lower():
+            raise HTTPException(status_code=404, detail=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {
+        "id": item.id,
+        "commercial_match_id": item.commercial_match_id,
+        "verification_status": item.verification_status,
+        "verified_at": item.verified_at,
+        "verified_by": item.verified_by,
+        "basis": item.basis,
+        "evidence_reference": item.evidence_reference,
+        "notes": item.notes,
+    }
+
+
+@app.get("/commercial/analyses/{analysis_id}/matches/{match_id}/evidence-verifications")
+def read_commercial_match_evidence_verifications(
+    analysis_id: int,
+    match_id: int,
+    db: Session = Depends(get_db),
+):
+    try:
+        items = get_commercial_match_evidence_verifications(db, analysis_id, match_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return [
+        {
+            "id": item.id,
+            "commercial_match_id": item.commercial_match_id,
+            "verification_status": item.verification_status,
+            "verified_at": item.verified_at,
+            "verified_by": item.verified_by,
+            "basis": item.basis,
+            "evidence_reference": item.evidence_reference,
+            "notes": item.notes,
+        }
+        for item in items
+    ]

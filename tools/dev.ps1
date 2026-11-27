@@ -280,25 +280,36 @@ print(json.dumps({"matches": matches}, ensure_ascii=False))
         }
         "smart" {
                         $trackedChanged = @(
-                & git.exe diff --name-only HEAD -- app tests
+                & git.exe diff --name-only HEAD
             )
             if ($LASTEXITCODE -ne 0) {
                 throw "Could not detect tracked changes."
             }
 
-            $untrackedCandidates = @(& git.exe ls-files --others --exclude-standard -- app tests)
+            $untrackedCandidates = @(& git.exe ls-files --others --exclude-standard)
             if ($LASTEXITCODE -ne 0) {
                 throw "Could not detect untracked application and test files."
             }
 
             $untrackedCode = @(
                 $untrackedCandidates | Where-Object {
-                    $isSourceOrTest = (
+                    $isAppOrTestPython = (
                         ($_ -match '^app/.+\.py$') -or
                         ($_ -match '^tests/.+\.py$')
                     )
-                    $isBackup = $_ -match '(?i)(\.bak|\.backup|\.before|\.recovered|\.old|backup_)'
-                    $isSourceOrTest -and -not $isBackup
+                    $isMigrationPython = $_ -match '^alembic/.+\.py$'
+                    $isRootTest = $_ -match '^test_[^/]+\.py$'
+                    $isTestConfig = $_ -match '^(alembic\.ini|pytest\.ini|pyproject\.toml|setup\.cfg|tox\.ini|noxfile\.py|conftest\.py|requirements[^/]*\.txt)$'
+                    $isCiConfig = $_ -match '^\.github/workflows/[^/]+\.(yml|yaml)$'
+                    $isBackup = $_ -match '(?i)(\.bak|\.backup|\.before|\.recovered|\.old|backup_|\.db$|\.sqlite3?$|\.safebackup_|^backups?/)'
+                    $isRelevant = (
+                        $isAppOrTestPython -or
+                        $isMigrationPython -or
+                        $isRootTest -or
+                        $isTestConfig -or
+                        $isCiConfig
+                    )
+                    $isRelevant -and -not $isBackup
                 }
             )
 
@@ -324,6 +335,26 @@ print(json.dumps({"matches": matches}, ensure_ascii=False))
                 }
 
                 switch -Exact ($path) {
+                    "app/ai/evidence_relevance_validator.py" {
+                        $selectedTests += "tests/test_evidence_relevance_validator.py"
+                    }
+                    "app/documents/doc_reader.py" {
+                        $selectedTests += "tests/test_document_extraction.py"
+                    }
+                    "app/documents/docx_reader.py" {
+                        $selectedTests += "tests/test_docx_reader.py"
+                        $selectedTests += "tests/test_document_extraction.py"
+                    }
+                    "app/documents/html_reader.py" {
+                        $selectedTests += "tests/test_html_reader.py"
+                        $selectedTests += "tests/test_document_extraction.py"
+                    }
+                    "app/documents/extraction_service.py" {
+                        $selectedTests += "tests/test_document_extraction.py"
+                    }
+                    "app/documents/pdf_layout.py" {
+                        $selectedTests += "tests/test_pdf_layout.py"
+                    }
                     "app/commercial/calculator.py" {
                         $selectedTests += "tests/test_commercial_calculator.py"
                     }
@@ -373,7 +404,9 @@ print(json.dumps({"matches": matches}, ensure_ascii=False))
                     "app/documents/storage.py" {
                         $selectedTests += "tests/test_document_upload_api.py"
                     }
-                    default {
+                    "app/ai/gemini.py" {
+                        $selectedTests += "tests/test_gemini_client.py"
+                    }                    default {
                         $fullRequired = $true
                     }
                 }
@@ -475,13 +508,7 @@ print(json.dumps({"matches": matches}, ensure_ascii=False))
                 throw "Explicit file paths are required. Use -Paths."
             }
 
-            $powerShellExe = Join-Path $PSHOME "pwsh.exe"
-            & $powerShellExe -NoProfile -File (Join-Path $PSScriptRoot "checkpoint.ps1") -Message $Message -Paths $Paths
-            $commitExitCode = $LASTEXITCODE
-
-            if ($commitExitCode -ne 0) {
-                throw "Checkpoint failed with exit code $commitExitCode."
-            }
+            & (Join-Path $PSScriptRoot "checkpoint.ps1") -Message $Message -Paths $Paths
         }
     }
 }

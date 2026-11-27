@@ -21,6 +21,7 @@ from app.commercial.models import (
     ProductDB,
     SupplierOfferDB,
     SupplierOfferVerificationDB,
+    CommercialMatchEvidenceVerificationDB,
     PriceListImportDB,
     CommercialAnalysisDB,
     CommercialMatchDB,
@@ -606,6 +607,78 @@ def verify_supplier_offer(
     except Exception:
         db.rollback()
         raise
+
+def verify_commercial_match_evidence(
+    db: Session,
+    analysis_id: int,
+    match_id: int,
+    verification_status: str,
+    verified_by: str,
+    basis: str,
+    evidence_reference: str = None,
+    notes: str = None,
+):
+    """Добавляет запись ручной проверки и обновляет текущий статус сопоставления."""
+
+    if verification_status not in {"Подтверждено", "Отклонено"}:
+        raise ValueError("Недопустимый статус проверки")
+    if not isinstance(verified_by, str) or not verified_by.strip():
+        raise ValueError("verified_by обязателен")
+    if not isinstance(basis, str) or not basis.strip():
+        raise ValueError("basis обязателен")
+    if evidence_reference is not None and not isinstance(evidence_reference, str):
+        raise ValueError("evidence_reference должен быть строкой")
+    if notes is not None and not isinstance(notes, str):
+        raise ValueError("notes должен быть строкой")
+
+    match = db.query(CommercialMatchDB).filter(
+        CommercialMatchDB.id == match_id,
+        CommercialMatchDB.analysis_id == analysis_id,
+    ).first()
+    if match is None:
+        raise ValueError("Сопоставление не найдено в указанном анализе")
+
+    item = CommercialMatchEvidenceVerificationDB(
+        commercial_match_id=match.id,
+        verification_status=verification_status,
+        verified_at=datetime.now(),
+        verified_by=verified_by.strip(),
+        basis=basis.strip(),
+        evidence_reference=evidence_reference.strip() if evidence_reference else None,
+        notes=notes,
+    )
+    try:
+        match.evidence_status = verification_status
+        db.add(item)
+        db.commit()
+        db.refresh(item)
+        return item
+    except Exception:
+        db.rollback()
+        raise
+
+
+def get_commercial_match_evidence_verifications(db: Session, analysis_id: int, match_id: int):
+    """Возвращает историю проверок от новых к старым."""
+
+    match = db.query(CommercialMatchDB).filter(
+        CommercialMatchDB.id == match_id,
+        CommercialMatchDB.analysis_id == analysis_id,
+    ).first()
+    if match is None:
+        raise ValueError("Сопоставление не найдено в указанном анализе")
+    return (
+        db.query(CommercialMatchEvidenceVerificationDB)
+        .filter(CommercialMatchEvidenceVerificationDB.commercial_match_id == match_id)
+        .order_by(
+            CommercialMatchEvidenceVerificationDB.verified_at.desc(),
+            CommercialMatchEvidenceVerificationDB.id.desc(),
+        )
+        .all()
+    )
+
+
+
 def get_all_supplier_offers(
     db: Session,
     supplier_id: int = None,

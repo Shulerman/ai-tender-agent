@@ -73,7 +73,7 @@ try {
             throw "Файл не найден или не является обычным файлом: $path"
         }
 
-        & git check-ignore -q -- ":(literal)$path"
+        & git check-ignore -q -- "$path"
         if ($LASTEXITCODE -eq 0) {
             throw "Файл исключён правилами Git: $path"
         }
@@ -168,5 +168,5 @@ try {
 }
 catch {
     Write-Host "`nОШИБКА: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
+    throw
 }

@@ -19,6 +19,7 @@ from app.commercial.models import (
     CommercialAnalysisDB,
     CommercialMatchRunDB,
     CommercialMatchDB,
+    CommercialMatchEvidenceVerificationDB,
     ProductDB,
     SupplierDB,
     SupplierOfferDB,
@@ -873,3 +874,144 @@ def test_calculate_commercial_analysis_validates_payload_and_analysis(client):
         "/commercial/analyses/1/calculate",
         json={"contract_revenue": 1000},
     ).status_code == 422
+
+def _create_evidence_verification_match(db):
+    _, analysis, _, requirement = create_scenario(db)
+    match = CommercialMatchDB(
+        analysis_id=analysis.id,
+        tender_requirement_id=requirement.id,
+        tender_requirement=requirement.requirement_text,
+        match_status="Полное соответствие",
+        evidence_status="Не проверено",
+    )
+    db.add(match)
+    db.commit()
+    db.refresh(match)
+    return analysis, match
+
+
+def test_manual_evidence_verification_history_is_append_only_and_updates_current_status(client, db):
+    analysis, match = _create_evidence_verification_match(db)
+    url = f"/commercial/analyses/{analysis.id}/matches/{match.id}/evidence-verification"
+    for status, person, basis in (
+        ("Подтверждено", "Иванов И.И.", "Сверка паспорта изделия"),
+        ("Отклонено", "Петров П.П.", "Характеристика не подтверждена"),
+    ):
+        response = client.post(url, json={
+            "verification_status": status,
+            "verified_by": person,
+            "basis": basis,
+        })
+        assert response.status_code == 200
+
+    history = client.get(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/evidence-verifications"
+    )
+    assert history.status_code == 200
+    assert [x["verification_status"] for x in history.json()] == ["Отклонено", "Подтверждено"]
+    db.refresh(match)
+    assert match.evidence_status == "Отклонено"
+    assert db.query(CommercialMatchEvidenceVerificationDB).filter_by(
+        commercial_match_id=match.id
+    ).count() == 2
+
+
+@pytest.mark.parametrize("payload", [
+    {"verification_status": "Не проверено", "verified_by": "Иванов", "basis": "Основание"},
+    {"verification_status": "Подтверждено", "verified_by": "", "basis": "Основание"},
+    {"verification_status": "Подтверждено", "verified_by": "Иванов", "basis": ""},
+    {"verification_status": "Подтверждено", "verified_by": "Иванов", "basis": "Основание", "unexpected": 1},
+])
+def test_manual_evidence_verification_rejects_invalid_payload(client, db, payload):
+    analysis, match = _create_evidence_verification_match(db)
+    response = client.post(
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}/evidence-verification",
+        json=payload,
+    )
+    assert response.status_code == 422
+
+
+def test_manual_evidence_verification_rejects_match_from_another_analysis(client, db):
+    analysis, match = _create_evidence_verification_match(db)
+    other_analysis, _ = _create_evidence_verification_match(db)
+    response = client.post(
+        f"/commercial/analyses/{other_analysis.id}/matches/{match.id}/evidence-verification",
+        json={
+            "verification_status": "Подтверждено",
+            "verified_by": "Иванов",
+            "basis": "Проверка паспорта",
+        },
+    )
+    assert response.status_code == 404
+
+
+def test_product_evidence_history_is_independent_from_supplier_offer_history(client, db):
+    from app.commercial.models import SupplierOfferVerificationDB
+
+    analysis, match, offer = _create_match_with_offer(db)
+    evidence_url = (
+        f"/commercial/analyses/{analysis.id}/matches/{match.id}"
+    )
+    evidence_history_url = f"{evidence_url}/evidence-verifications"
+    supplier_history_url = f"/commercial/offers/{offer.id}/verifications"
+
+    evidence_response = client.post(
+        f"{evidence_url}/evidence-verification",
+        json={
+            "verification_status": "Отклонено",
+            "verified_by": "Иванов И.И.",
+            "basis": "Характеристика не подтверждена",
+            "evidence_reference": "Паспорт изделия, стр. 4",
+        },
+    )
+    assert evidence_response.status_code == 200
+
+    db.refresh(match)
+    db.refresh(offer)
+    assert match.evidence_status == "Отклонено"
+    assert offer.verification_status == "Не проверено"
+
+    evidence_history_response = client.get(evidence_history_url)
+    supplier_history_response = client.get(supplier_history_url)
+    assert evidence_history_response.status_code == 200
+    assert supplier_history_response.status_code == 200
+
+    evidence_history_before = evidence_history_response.json()
+    assert len(evidence_history_before) == 1
+    assert evidence_history_before[0]["verification_status"] == "Отклонено"
+    assert supplier_history_response.json() == []
+
+    supplier_response = client.post(
+        f"/commercial/offers/{offer.id}/verification",
+        json={
+            "verification_status": "Подтверждено",
+            "verified_by": "Петров П.П.",
+            "notes": "Цена и наличие проверены",
+        },
+    )
+    assert supplier_response.status_code == 200
+
+    db.refresh(match)
+    db.refresh(offer)
+    assert offer.verification_status == "Подтверждено"
+    assert match.evidence_status == "Отклонено"
+
+    evidence_history_after = client.get(evidence_history_url)
+    supplier_history_after = client.get(supplier_history_url)
+    assert evidence_history_after.status_code == 200
+    assert supplier_history_after.status_code == 200
+
+    assert evidence_history_after.json() == evidence_history_before
+    supplier_history = supplier_history_after.json()
+    assert len(supplier_history) == 1
+    assert supplier_history[0]["verification_status"] == "Подтверждено"
+
+    assert (
+        CommercialMatchEvidenceVerificationDB.__tablename__
+        != SupplierOfferVerificationDB.__tablename__
+    )
+    assert (
+        CommercialMatchEvidenceVerificationDB.__table__.c.commercial_match_id
+        is not None
+    )
+    assert SupplierOfferVerificationDB.__table__.c.offer_id is not None

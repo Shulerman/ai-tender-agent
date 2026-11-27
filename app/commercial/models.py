@@ -347,6 +347,34 @@ class SupplierOfferVerificationDB(Base):
     verified_by = Column(String, nullable=True)
     notes = Column(Text, nullable=True)
 
+
+class CommercialMatchEvidenceVerificationDB(Base):
+    """История ручной проверки доказательств характеристик товара."""
+
+    __tablename__ = "commercial_match_evidence_verifications"
+
+    __table_args__ = (
+        CheckConstraint(
+            "verification_status IN ('Подтверждено', 'Отклонено')",
+            name="ck_commercial_match_evidence_verification_status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    commercial_match_id = Column(
+        Integer,
+        ForeignKey("commercial_matches.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    verification_status = Column(String, nullable=False)
+    verified_at = Column(DateTime, nullable=False)
+    verified_by = Column(String, nullable=False)
+    basis = Column(Text, nullable=False)
+    evidence_reference = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)
+
+
 class CommercialAnalysisDB(Base):
     """Сохранённый результат коммерческого анализа тендера."""
 
@@ -486,6 +514,164 @@ class CommercialMatchDB(Base):
     created_at = Column(DateTime, nullable=True)
 
 
+
+
+class CommercialProposalDB(Base):
+    """Версия коммерческого предложения по результатам анализа тендера."""
+
+    __tablename__ = "commercial_proposals"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "commercial_analysis_id",
+            "version",
+            name="uq_commercial_proposal_analysis_version",
+        ),
+        CheckConstraint("version > 0", name="ck_commercial_proposal_version_positive"),
+        CheckConstraint(
+            "status IN ('Черновик', 'Неполное', 'Готово')",
+            name="ck_commercial_proposal_status",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    commercial_analysis_id = Column(
+        Integer,
+        ForeignKey("commercial_analyses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    tender_analysis_id = Column(
+        Integer,
+        ForeignKey("tender_analyses.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    version = Column(Integer, nullable=False)
+    status = Column(String(20), nullable=False, default="Черновик")
+    currency = Column(String(3), nullable=False, default="RUB")
+
+    total_amount = Column(Numeric(16, 2), nullable=True)
+    known_total_amount = Column(Numeric(16, 2), nullable=True)
+
+    issues = Column(JSON, nullable=True)
+    generated_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
+
+
+class CommercialProposalItemDB(Base):
+    """Зафиксированная позиция версии коммерческого предложения."""
+
+    __tablename__ = "commercial_proposal_items"
+
+    __table_args__ = (
+        CheckConstraint(
+            "quantity IS NULL OR quantity >= 0",
+            name="ck_commercial_proposal_item_quantity_nonnegative",
+        ),
+        CheckConstraint(
+            "unit_price IS NULL OR unit_price >= 0",
+            name="ck_commercial_proposal_item_unit_price_nonnegative",
+        ),
+        CheckConstraint(
+            "line_total IS NULL OR line_total >= 0",
+            name="ck_commercial_proposal_item_line_total_nonnegative",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    proposal_id = Column(
+        Integer,
+        ForeignKey("commercial_proposals.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    tender_requirement_id = Column(
+        Integer,
+        ForeignKey("tender_requirements.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    commercial_match_id = Column(
+        Integer,
+        ForeignKey("commercial_matches.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    product_id = Column(
+        Integer,
+        ForeignKey("products.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    offer_id = Column(
+        Integer,
+        ForeignKey("supplier_offers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    supplier_id = Column(
+        Integer,
+        ForeignKey("suppliers.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    position_number = Column(Integer, nullable=True)
+
+    # Снимок исходного требования и выбранного товара.
+    requirement_text_snapshot = Column(Text, nullable=False)
+    product_name_snapshot = Column(String, nullable=True)
+    product_article_snapshot = Column(String, nullable=True)
+    manufacturer_name_snapshot = Column(String, nullable=True)
+    product_description_snapshot = Column(Text, nullable=True)
+    technical_characteristics_snapshot = Column(Text, nullable=True)
+    technical_attributes_snapshot = Column(JSON, nullable=True)
+    product_unit_snapshot = Column(String, nullable=True)
+
+    # Снимок поставщика и предложения.
+    supplier_name_snapshot = Column(String, nullable=True)
+    offer_price_snapshot = Column(Numeric(14, 2), nullable=True)
+    offer_currency_snapshot = Column(String(3), nullable=True)
+    offer_unit_snapshot = Column(String, nullable=True)
+    available_quantity_snapshot = Column(Numeric(14, 3), nullable=True)
+    availability_status_snapshot = Column(String, nullable=True)
+    delivery_time_days_snapshot = Column(Integer, nullable=True)
+    payment_terms_snapshot = Column(Text, nullable=True)
+    delivery_cost_snapshot = Column(Numeric(14, 2), nullable=True)
+    offer_received_at_snapshot = Column(DateTime, nullable=True)
+    offer_valid_until_snapshot = Column(DateTime, nullable=True)
+    offer_verification_status_snapshot = Column(String, nullable=True)
+
+    # Расчётные значения позиции.
+    quantity = Column(Numeric(14, 3), nullable=True)
+    unit = Column(String, nullable=True)
+    unit_price = Column(Numeric(14, 2), nullable=True)
+    line_total = Column(Numeric(16, 2), nullable=True)
+    currency = Column(String(3), nullable=False, default="RUB")
+    price_verification_status = Column(String, nullable=False, default="Не проверена")
+
+    # Снимок технической проверки и обоснований.
+    match_status_snapshot = Column(String, nullable=True)
+    match_score_snapshot = Column(Numeric(5, 2), nullable=True)
+    confirmed_characteristics_snapshot = Column(Text, nullable=True)
+    missing_characteristics_snapshot = Column(Text, nullable=True)
+    discrepancies_snapshot = Column(Text, nullable=True)
+    evidence_status_snapshot = Column(String, nullable=True)
+    evidence_references_snapshot = Column(Text, nullable=True)
+    evidence_verified_at_snapshot = Column(DateTime, nullable=True)
+    evidence_verified_by_snapshot = Column(String, nullable=True)
+    evidence_basis_snapshot = Column(Text, nullable=True)
+    evidence_reference_snapshot = Column(Text, nullable=True)
+    evidence_notes_snapshot = Column(Text, nullable=True)
+    source_references = Column(JSON, nullable=True)
+
+    notes = Column(Text, nullable=True)
+    recommendation = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.now)
 
 class ProductDuplicateReviewDB(Base):
     """Журнал ручной проверки потенциальных дублей товаров."""
