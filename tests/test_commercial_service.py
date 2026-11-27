@@ -1029,11 +1029,12 @@ def test_create_commercial_match_with_requirement_and_run(db):
             "analysis_id": analysis.id,
             "tender_requirement_id": requirement.id,
             "match_run_id": match_run.id,
-            "tender_requirement": requirement.requirement_text,
+            "tender_requirement": "Ошибочный текст из входных данных",
         },
     )
 
     assert match.tender_requirement_id == requirement.id
+    assert match.tender_requirement == requirement.requirement_text
     assert match.match_run_id == match_run.id
     assert match.analysis_id == analysis.id
 

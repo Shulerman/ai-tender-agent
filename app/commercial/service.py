@@ -893,6 +893,8 @@ def create_commercial_match(db: Session, match_data: dict):
             _validate_non_negative(value, field)
 
     data = dict(match_data)
+    if requirement is not None:
+        data["tender_requirement"] = requirement.requirement_text
     data["product_id"] = product_id
     data["match_score"] = score
     data.setdefault("created_at", datetime.now())

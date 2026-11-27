@@ -1530,6 +1530,7 @@ def calculate_commercial_analysis_endpoint(
         price_verified = (
             offer is not None
             and offer.verification_status == "Подтверждено"
+            and (offer.valid_until is None or offer.valid_until >= datetime.now())
             and offer_currency == "RUB"
             and match_currency == "RUB"
         )

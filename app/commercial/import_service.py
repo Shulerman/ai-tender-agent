@@ -173,7 +173,12 @@ def import_price_list(
     Предложения создаются только для однозначно найденных товаров.
     """
 
-    supplier = db.get(SupplierDB, supplier_id)
+    supplier = (
+        db.query(SupplierDB)
+        .filter(SupplierDB.id == supplier_id)
+        .with_for_update()
+        .first()
+    )
 
     if supplier is None:
         raise ValueError("Поставщик не найден")
@@ -288,6 +293,30 @@ def import_price_list(
                     item.get("article_number"),
                     item.get("name"),
                 )
+
+                catalog_article = _normalize(item.get("article_number"))
+                if normalized_article and catalog_article and product is not None:
+                    article_matches = [
+                        candidate
+                        for candidate in products
+                        if _normalize(candidate.article_number) == catalog_article
+                    ]
+                    if len(article_matches) == 1 and article_matches[0].id == product.id:
+                        now = datetime.now()
+                        db.add(SupplierProductMappingDB(
+                            supplier_id=supplier_id,
+                            supplier_article_number=str(
+                                item.get("source_article_number")
+                                or item.get("article_number")
+                            ),
+                            normalized_supplier_article_number=normalized_article,
+                            product_id=product.id,
+                            supplier_product_name=(
+                                item.get("source_name") or item.get("name")
+                            ),
+                            created_at=now,
+                            updated_at=now,
+                        ))
 
             row_status = (
                 "Сопоставлен"
@@ -440,6 +469,15 @@ def match_import_row(
         )
         if import_record is None:
             raise ValueError("Импорт не найден.")
+
+        supplier = (
+            db.query(SupplierDB)
+            .filter(SupplierDB.id == import_record.supplier_id)
+            .with_for_update()
+            .first()
+        )
+        if supplier is None:
+            raise ValueError("Поставщик не найден.")
 
         import_row = (
             db.query(PriceListImportRowDB)

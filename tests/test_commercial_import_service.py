@@ -130,6 +130,11 @@ def test_import_matches_product_by_article(
     assert row.offer_id == offer.id
     assert row.status == "Сопоставлен"
     assert offer.product_id == product.id
+    mapping = db.query(SupplierProductMappingDB).filter_by(
+        supplier_id=supplier.id,
+        normalized_supplier_article_number=f"a-100-{test_id}".casefold(),
+    ).one()
+    assert mapping.product_id == product.id
     assert offer.unit == "упаковка"
     assert offer.verification_status == "Не проверено"
     assert offer.source_reference is not None
@@ -176,6 +181,10 @@ def test_import_falls_back_to_exact_name(
     assert row.product_id == product.id
     assert row.status == "Сопоставлен"
     assert offer.product_id == product.id
+    assert db.query(SupplierProductMappingDB).filter_by(
+        supplier_id=supplier.id,
+        normalized_supplier_article_number="unknown-999",
+    ).first() is None
 
 
 def test_unknown_product_is_not_created(
