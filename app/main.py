@@ -1103,6 +1103,7 @@ def reassign_supplier_product_mapping(
     mapping = (
         db.query(SupplierProductMappingDB)
         .filter_by(id=mapping_id, supplier_id=supplier_id)
+        .with_for_update()
         .first()
     )
     if mapping is None:
